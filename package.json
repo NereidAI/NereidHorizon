@@ -26,7 +26,7 @@
     "test": "node --test server/api-docs.test.cjs server/api-key-scopes.test.cjs server/distribution-tasks.test.cjs server/model-service-api.test.cjs server/ns.test.cjs"
   },
   "dependencies": {
-    "@ant-design/icons": "^6.3.2",
+    "@ant-design/icons": "^6.3.4",
     "antd": "^6.6.2",
     "busboy": "^1.6.0",
     "express": "^5.2.1",
