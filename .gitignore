@@ -1,0 +1,59 @@
+# Dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist
+build
+*.local
+
+# IDE & OS files
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.cfg
+# Server-side session master key (auto-generated, NEVER commit)
+.session.key
+*.session.key
+# Redis persistence (local dev)
+redis-data/
+dump.rdb
+
+# Logs
+logs
+*.log
+
+# Test coverage
+coverage
+.nyc_output
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Temporary files
+tmp
+temp
+*.tmp
+*.temp
+
+# Docker
+docker-compose.override.yml
+
+# Deployment configs
+deploy/*.cfg
+deploy/*.json
+!deploy/*.example.json
+!deploy/*.example.cfg
+# Local operator/tooling files (never published)
+.hub-creds
+opencode.json

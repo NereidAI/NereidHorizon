@@ -1,0 +1,89 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nereidhorizon-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=nereid
+      - POSTGRES_USER=nereid
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nereidpass}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - nereid-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nereid -d nereid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  nereidhorizon-backend:
+    image: ghcr.io/nereidai/nereidhorizon-backend:0.0.0-dev
+    container_name: nereidhorizon-backend
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-../.deployment/deploy-values/nereidhorizon/backend.env}
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - NEREIDHORIZON_LOG_DIR=/app/logs
+      - NEREIDHORIZON_SESSION_KEY_FILE=/app/state/session.key
+      - DATABASE_URL=postgres://nereid:${POSTGRES_PASSWORD:-nereidpass}@postgres:5432/nereid
+      - SESSION_TTL=86400
+      - SESSION_ABS_TTL=28800
+      # Optional 32-byte hex key. When empty, the backend uses the persistent
+      # mounted state/session.key file and preserves it across restarts.
+      - SESSION_ENC_KEY=${SESSION_ENC_KEY:-}
+      # Optional OpenID Connect single sign-on. Leave OIDC_ISSUER unset to
+      # disable SSO and use local password login only.
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-openid profile email}
+      - OIDC_ROLE_CLAIM=${OIDC_ROLE_CLAIM:-groups}
+      - OIDC_PLATFORM_GROUP=${OIDC_PLATFORM_GROUP:-nereidhorizon-platform}
+      - OIDC_PARTNER_GROUP_PREFIX=${OIDC_PARTNER_GROUP_PREFIX:-nereidhorizon-partner-}
+      - OIDC_LOCAL_LOGIN_ENABLED=${OIDC_LOCAL_LOGIN_ENABLED:-true}
+      - OIDC_INSECURE_SKIP_VERIFY=${OIDC_INSECURE_SKIP_VERIFY:-false}
+    volumes:
+      - ${LOG_DIR:-../.deployment/deploy-logs/nereidhorizon}:/app/logs
+      - ${DEPLOY_VALUES_DIR:-../.deployment/deploy-values/nereidhorizon}/state:/app/state
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - nereid-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  nereidhorizon-frontend:
+    image: ghcr.io/nereidai/nereidhorizon-frontend:0.0.0-dev
+    container_name: nereidhorizon-frontend
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+      - "8090:80"
+    depends_on:
+      nereidhorizon-backend:
+        condition: service_healthy
+    networks:
+      - nereid-network
+
+networks:
+  nereid-network:
+    driver: bridge
+
+volumes:
+  postgres-data:

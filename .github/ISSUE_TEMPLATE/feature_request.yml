@@ -1,0 +1,26 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+
+name: Feature request
+description: Suggest an idea for NereidHorizon
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem would this feature solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

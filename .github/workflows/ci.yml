@@ -1,0 +1,90 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+# Branch/PR gate (root treaty §19). The docker job builds both multi-stage
+# targets for both release architectures into the shared GitHub Actions
+# buildx cache: nothing is loaded or pushed, and the tag-triggered publish
+# workflow reuses the warmed layers. build-push-action is required because
+# the gha cache backend relies on the Actions runtime integration.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Typecheck & Build (Frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Warm image build cache (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: backend
+            image: nereidhorizon-backend
+          - target: frontend
+            image: nereidhorizon-frontend
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build ${{ matrix.target }} into the shared GHA cache (no push, no load)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          # Same dev-channel build argument as publish-dev.yml, so the cache
+          # keys line up; release runs inject bare SemVer via the tag workflow.
+          build-args: |
+            VERSION=0.0.0-dev
+          # Each image needs its own stable gha scope: two builds sharing the
+          # bare type=gha scope overwrite each other's cache indexes. The
+          # scope strings match the publish.yml/publish-dev.yml callers
+          # byte-for-byte.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false
+          sbom: false
+
+  backend-syntax:
+    name: Backend Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Check server syntax
+        run: node --check server/index.cjs && node --check server/sign-utils.cjs && node --check server/ns.cjs && node --check server/oidc.cjs
+      - name: Backend unit tests
+        run: node --test server/ns.test.cjs
