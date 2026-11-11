@@ -1,0 +1,58 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+# Rolling dev channel (root treaty §19). Every push to main publishes the
+# 0.0.0-dev floating tag and an immutable 0.0.0-dev-<sha> tag per image to
+# GHCR via the organization reusable workflow. There is no VERSION file and
+# no release tag on a branch build, so the dev version is fixed 0.0.0-dev.
+# Pull requests deliberately do not trigger this, so forks cannot publish
+# into the organization namespace. Formal releases remain tag-only through
+# publish.yml.
+#
+# One reusable-workflow call per matrix image, each with the same gha
+# cache-scope as the matching ci.yml warm job and publish.yml release caller.
+name: Publish Dev Images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prep:
+    name: Derive image build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.meta.outputs.build_date }}
+    steps:
+      - id: meta
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.image }} (dev)
+    needs: prep
+    strategy:
+      matrix:
+        include:
+          - target: backend
+            image: nereidhorizon-backend
+          - target: frontend
+            image: nereidhorizon-frontend
+    uses: NereidAI/.github/.github/workflows/publish-dev-image.yml@v1
+    with:
+      image-name: ${{ matrix.image }}
+      target: ${{ matrix.target }}
+      # Must match the ci.yml warm step's gha scope for this image exactly.
+      cache-scope: ${{ matrix.image }}
+      # OCI annotation inputs consumed by the Dockerfile's ARG declarations.
+      # VERSION (0.0.0-dev) is injected automatically by the reusable workflow.
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+        BUILD_DATE=${{ needs.prep.outputs.build_date }}

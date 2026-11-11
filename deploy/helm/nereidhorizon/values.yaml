@@ -1,0 +1,155 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default deployment values for nereidhorizon. Business images use canonical
+# GHCR coordinates and may resolve through a path-preserving k3s Harbor mirror;
+# image tags default to Chart.appVersion (0.0.0-dev on the branch; the release's
+# bare SemVer in a release-packaged chart) when left empty.
+
+# Optional pull secret rendered by templates/pull-secret.yaml from
+# registryCredentials below; omitted entirely while username stays empty.
+global:
+  # The name carries no registry hostname and is compliant as-is. The
+  # matching Secret is rendered by pull-secret.yaml only when
+  # registryCredentials.username is supplied via an untracked -f file;
+  # until then public coordinates pull anonymously and the dangling
+  # reference is ignored by the kubelet (treaty §18).
+  imagePullSecrets:
+    - name: harbor-registry-secret
+
+# Credentials rendered into the pull secret named below. The template
+# renders nothing while username is empty. Supply all values at install
+# time via an untracked -f file; the registry hostname is site-local.
+registryCredentials:
+  registry: ""
+  username: ""
+  password: ""
+  email: ""
+imagePullSecretName: harbor-registry-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+backend:
+  image:
+    registry: ghcr.io
+    repository: nereidai/nereidhorizon-backend
+    tag: ""
+    pullPolicy: Always
+  replicaCount: 1
+  nodeSelector: {}
+  sessionTtl: 86400
+  sessionAbsTtl: 28800
+  modelUpload:
+    # Compressed upload/download budget and expanded-archive safety limits.
+    maxBytes: 8589934592
+    maxExpandedBytes: 17179869184
+    maxFileBytes: 17179869184
+    maxEntries: 100000
+    # Ensure this filesystem has room for at least one maxBytes spool per active upload.
+    tempDir: /tmp
+    # Comma-separated HTTP(S) Origins allowed for URL distribution. Empty disables URL sources.
+    allowedUrlOrigins: ""
+    urlTimeoutSeconds: 3600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+frontend:
+  image:
+    registry: ghcr.io
+    repository: nereidai/nereidhorizon-frontend
+    tag: ""
+    pullPolicy: Always
+  replicaCount: 1
+  nodeSelector: {}
+  modelPublishTimeoutSeconds: 7200
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+# Dedicated PostgreSQL for the BFF. Disable only when externalDatabase.url is
+# set to a database that is NOT the Exchange's own PostgreSQL.
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  auth:
+    database: nereid
+    username: nereid
+    # Empty: a random password is generated once and kept in the release Secret.
+    password: ""
+  # PG data must live on block storage (local-path); NFS root-squash prevents
+  # the postgres user from chmod-ing PGDATA.
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: local-path
+  resources: {}
+
+externalDatabase:
+  # Full connection URL, e.g. postgresql://user:pass@host:5432/nereid
+  url: ""
+
+# Generic OpenID Connect single sign-on (authorization code + PKCE). Disabled
+# when oidc.issuer is empty, in which case only local password login is used.
+# Client secrets are rendered into the release Secret and never stored in
+# values in plaintext for production; supply clientSecret at install time.
+oidc:
+  enabled: false
+  # Issuer URL, e.g. https://sso.example.com/auth/realms/nereidai
+  issuer: ""
+  clientId: ""
+  clientSecret: ""
+  # Public callback URL as registered on the IdP, e.g.
+  # https://nereidhorizon.example.com/api/oidc/callback
+  redirectUri: ""
+  scopes: "openid profile email"
+  roleClaim: "groups"
+  platformGroup: "nereidhorizon-platform"
+  partnerGroupPrefix: "nereidhorizon-partner-"
+  # Set true to disable the local password form for regular users; the
+  # bootstrap admin can always still reach /login?local=1.
+  localLoginEnabled: true
+  insecureSkipVerify: false
+  # Name of a Secret in the release namespace with key ca.crt holding the CA
+  # that signs the IdP. Needed when the issuer uses a cluster-internal CA
+  # (e.g. cert-manager internal-ca): it is mounted into the container and
+  # exposed via NODE_EXTRA_CA_CERTS, so TLS verification stays on.
+  caBundleSecret: ""
+
+# NereidSphere (NS) ticket-based SSO. When enabled, this is the primary SSO
+# mode (takes precedence over OIDC in the UI). Disabled when ns.baseUrl is empty.
+ns:
+  enabled: true
+  # NS base URL, e.g. https://nereidsphere.example.com
+  baseUrl: ""
+  # Product ID as registered in NS (must match NS product config)
+  productId: ""
+  # Shared secret for ticket verification (must match NS product ssoSecret)
+  clientSecret: ""
+  # Callback path on NS (must match NS product ssoCallbackPath)
+  callbackPath: "/auth/ns-callback"
+  # Optional Secret/key holding the CA that signs NS. It is exposed through
+  # NODE_EXTRA_CA_CERTS so server-side ticket verification keeps TLS validation.
+  # When direct OIDC is also enabled, this bundle takes precedence for Node's
+  # single NODE_EXTRA_CA_CERTS setting and must also trust the OIDC issuer.
+  caBundleSecret: ""
+  caBundleKey: "ca.crt"
+
+# Traefik terminates TLS at the edge (certificate issued by the internal-ca
+# cluster issuer), so nginx serves plain HTTP on 80 only.
+ingress:
+  enabled: true
+  className: traefik
+  host: nereidhorizon.example.com
+  tls:
+    enabled: true
+    secretName: nereidhorizon-tls

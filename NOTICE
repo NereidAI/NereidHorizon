@@ -1,0 +1,52 @@
+NereidHorizon
+Copyright (C) 2026 YIQISOFT
+
+This product includes software developed at YIQISOFT (https://www.yiqisoft.cn/).
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this product except in compliance with the License. You may obtain a copy of
+the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Third-Party Components
+----------------------
+This product bundles or depends on the following third-party open-source
+components, each distributed under its own license (compatible with
+Apache-2.0). The complete dependency list with resolved versions and license
+metadata is available in package-lock.json.
+
+Runtime dependencies:
+
+  - React, React DOM, React Router DOM        (MIT License)
+  - Ant Design (antd), @ant-design/icons      (MIT License)
+  - Express                                     (MIT License)
+  - pg (node-postgres)                          (MIT License)
+  - busboy                                      (MIT License)
+  - tar-stream                                  (MIT License)
+  - openid-client                               (MIT License)
+  - swagger-ui-dist                             (Apache License 2.0)
+
+Container base images:
+
+  - Node.js Alpine image                        (MIT-licensed Node.js; Alpine packages under their own licenses)
+  - Nginx (frontend runtime image)              (BSD-2-Clause License)
+
+Build tooling (not redistributed in runtime images):
+
+  - Vite                                        (MIT License)
+  - TypeScript                                  (Apache License 2.0)
+
+The full text of each license is available in the respective upstream
+repositories. This NOTICE file satisfies the attribution requirements of the
+Apache License 2.0 when redistributing this Work.
+
+Upstream Project Acknowledgment
+--------------------------------
+This product is designed to integrate with Open Horizon, an LF Edge project
+(https://open-horizon.github.io/, https://github.com/open-horizon). It
+communicates with the Open Horizon Exchange REST API and its deployment
+templates reference Open Horizon container images (Apache License 2.0), but
+does not redistribute Open Horizon source code. This product is an
+independent work and is not part of, or endorsed by, the Open Horizon
+project or LF Edge.

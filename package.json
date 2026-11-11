@@ -1,0 +1,48 @@
+{
+  "name": "nereidhorizon",
+  "private": true,
+  "version": "0.0.0-dev",
+  "description": "Web management console and BFF proxy for the Open Horizon Management Hub, with ESS/MMS model distribution",
+  "license": "Apache-2.0",
+  "author": "YIQISOFT <jiekechoo@gmail.com>",
+  "homepage": "https://github.com/NereidAI/NereidHorizon#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NereidAI/NereidHorizon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NereidAI/NereidHorizon/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:backend": "node server/index.cjs",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test server/api-docs.test.cjs server/api-key-scopes.test.cjs server/distribution-tasks.test.cjs server/model-service-api.test.cjs server/ns.test.cjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.3.2",
+    "antd": "^6.6.2",
+    "busboy": "^1.6.0",
+    "express": "^5.2.1",
+    "openid-client": "^5.7.1",
+    "pg": "^8.23.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.1",
+    "swagger-ui-dist": "^5.34.1",
+    "tar-stream": "^3.2.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

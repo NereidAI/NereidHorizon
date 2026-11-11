@@ -1,0 +1,4813 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+
+openapi: 3.0.3
+info:
+  title: NereidHorizon Console API
+  description: |
+    BFF (Backend-For-Frontend) proxy for the Open Horizon Exchange API.
+
+    **Authentication:**
+    - Session cookie (`nereid_sid`): HttpOnly, SameSite=Lax, Secure on HTTPS.
+    - CSRF protection: Mutating requests (POST/PUT/PATCH/DELETE) require both
+      the `nereid_csrf` cookie and the `X-Csrf-Token` header with matching values.
+    - Public endpoints (health, setup-status, setup, login, oidc) do not require auth.
+    - `/api/docs` and `/api/docs/openapi.yaml` provide public read-only (GET/HEAD)
+      documentation with locally served assets; business APIs remain protected.
+    - Scoped API keys use `X-Api-Key` and bypass neither their own router nor
+      scope checks. `partner:read` is limited to GET `/api/v1/{org}/...`;
+      `model:distribute` is limited to the service-to-service model API under
+      `/api/service/v1/...` and does not use console session or CSRF tokens.
+    - Two BFF roles exist: `platform` (full access) and `partner` (read-only
+      on Exchange resources + self-service API key management).
+    - Local password login may be disabled (`OIDC_LOCAL_LOGIN_ENABLED=false`);
+      the bootstrap admin can always sign in at `/login?local=1`.
+    - Generic OpenID Connect SSO (authorization code + PKCE) is available at
+      `/api/oidc/login` when `OIDC_ISSUER` is configured. Roles are derived
+      from a group claim (platform group + `nereidhorizon-partner-<org>`
+      prefixes); users are JIT-provisioned and identified by `(issuer, subject)`.
+
+    **Data layer:**
+    - Local BFF users, Exchange config, API keys, audit log, and server-side
+      sessions are stored in PostgreSQL (required). Sessions are encrypted with
+      AES-256-GCM under `SESSION_ENC_KEY`.
+    - Exchange credentials are stored once at the system level and shared by
+      all sessions; users never supply Exchange credentials directly.
+  version: 2.2.0
+  contact:
+    name: NereidHorizon
+
+servers:
+  - url: /
+    description: Current origin (recommended)
+  - url: http://localhost:3001
+    description: Local BFF development
+
+tags:
+  - name: Auth
+  - name: System
+  - name: Organizations
+  - name: Users
+  - name: Nodes
+  - name: Services
+  - name: Patterns
+  - name: Deployment Policies
+  - name: Management Policies
+  - name: Catalog
+  - name: Agbots
+  - name: Agbot Patterns
+  - name: Agbot Business Policies
+  - name: HA Groups
+  - name: Dashboard
+  - name: Registry
+  - name: Search
+  - name: Changes
+  - name: Agent File Version
+  - name: Secrets
+  - name: Service Instances
+  - name: Model Distribution
+  - name: Service Model API
+
+paths:
+  # =============================================================
+  # Auth (BFF user)
+  # =============================================================
+  /api/setup-status:
+    get:
+      tags: [Auth]
+      summary: First-time setup status
+      description: Returns whether the system has been initialized (admin user + Exchange config).
+      operationId: setupStatus
+      responses:
+        '200':
+          description: Setup status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  needsSetup:
+                    type: boolean
+                    description: No admin user exists yet
+                  exchangeConfigured:
+                    type: boolean
+                    description: Exchange connection has been configured
+                  oidcEnabled:
+                    type: boolean
+                    description: OpenID Connect SSO is configured (OIDC_ISSUER set)
+                  oidcConfigured:
+                    type: boolean
+                    description: All required OIDC settings are present
+                  localLoginEnabled:
+                    type: boolean
+                    description: Local password login is permitted for regular users
+
+  /api/setup:
+    post:
+      tags: [Auth]
+      summary: First-time setup
+      description: |
+        Creates the initial platform admin user AND configures the Exchange
+        connection in one step. Runs Exchange credential verification before
+        persisting. Only works when no admin user exists.
+      operationId: setup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adminUser, adminPassword, baseURL, user, password]
+              properties:
+                adminUser:
+                  type: string
+                  description: BFF platform admin username
+                  example: admin
+                adminPassword:
+                  type: string
+                  description: BFF platform admin password
+                  example: admin123
+                baseURL:
+                  type: string
+                  format: uri
+                  description: Exchange base URL
+                  example: http://exchange.example.com:3090
+                user:
+                  type: string
+                  description: Exchange credential user (org/username)
+                  example: myorg/admin
+                password:
+                  type: string
+                  description: Exchange credential password
+                  example: WmgHbLbxWjxQifijLxMpIUNhZaPjgf
+      responses:
+        '200':
+          description: Setup complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '400':
+          description: Already initialized or missing parameters
+
+  /api/login:
+    post:
+      tags: [Auth]
+      summary: BFF user login (local password)
+      description: |
+        Authenticates against the local BFF user store. On success, sets the
+        `nereid_sid` HttpOnly session cookie and the `nereid_csrf` cookie.
+        The CSRF token is also returned in the JSON body for the SPA to use
+        in the `X-Csrf-Token` header on mutating requests.
+
+        Rate limited: five failed attempts per (IP, username) within five
+        minutes lock further attempts with `429`. Returns `403` when local
+        login is disabled (only the bootstrap admin may still sign in).
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  example: admin
+                password:
+                  type: string
+                  example: admin123
+                org:
+                  type: string
+                  description: Optional bound org for partner accounts with duplicate usernames
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              description: nereid_sid (HttpOnly) + nereid_csrf
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgId:
+                    type: string
+                    example: myorg
+                  version:
+                    type: string
+                    example: 2.154.0
+                  role:
+                    type: string
+                    enum: [platform, partner]
+                    example: platform
+                  username:
+                    type: string
+                    example: admin
+                  org:
+                    type: string
+                    nullable: true
+                    description: Partner user's bound org (null for platform)
+                  availableOrgs:
+                    type: array
+                    items:
+                      type: string
+                    description: Orgs this session may operate on
+                  authType:
+                    type: string
+                    enum: [local, oidc]
+                    example: local
+                  csrfToken:
+                    type: string
+                    description: CSRF token (also set as cookie)
+        '400':
+          description: Exchange not configured
+        '401':
+          description: Invalid credentials
+        '403':
+          description: Account disabled, or local login disabled (use SSO or /login?local=1)
+        '429':
+          description: Too many failed attempts
+
+  /api/oidc/login:
+    get:
+      tags: [Auth]
+      summary: Start OpenID Connect SSO login
+      description: |
+        Redirects the browser to the IdP authorization endpoint using the
+        authorization-code flow with PKCE. `state`, `nonce`, and the PKCE
+        verifier are sealed in a short-lived `nereid_oidc` HttpOnly cookie.
+        Failures redirect to `/login?oidc_error=<code>`.
+      operationId: oidcLogin
+      responses:
+        '302':
+          description: Redirect to the IdP authorization endpoint (or back to /login?oidc_error=...)
+
+  /api/oidc/callback:
+    get:
+      tags: [Auth]
+      summary: OpenID Connect SSO callback
+      description: |
+        Exchanges the authorization code, validates the ID token, maps the
+        group claim to a BFF role, JIT-provisions or updates the federated
+        user, and issues the normal session cookies. On any failure it clears
+        the state cookie and redirects to `/login?oidc_error=<code>` where
+        `<code>` is one of: `state_missing`, `state_invalid`, `idp_denied`,
+        `callback_invalid`, `no_group`, `ambiguous_groups`,
+        `invalid_org_claim`, `unknown_org`, `email_unverified`,
+        `account_disabled`, `callback_failed`, `oidc_unavailable`,
+        `oidc_disabled`, `not_configured`.
+      operationId: oidcCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to `/` on success, or `/login?oidc_error=<code>` on failure
+
+  /api/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      description: |
+        Destroys the server-side session and clears cookies. For OIDC sessions
+        the provider's end-session URL is returned so the SPA can also complete
+        RP-initiated logout upstream.
+      operationId: logout
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  redirect:
+                    type: string
+                    nullable: true
+                    description: IdP end-session URL for OIDC sessions, else null
+        '403':
+          description: CSRF validation failed
+
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Current session info
+      description: Used by the SPA to restore session on page refresh.
+      operationId: me
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Session context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgId:
+                    type: string
+                    example: myorg
+                  version:
+                    type: string
+                    example: 2.154.0
+                  role:
+                    type: string
+                    enum: [platform, partner]
+                    example: platform
+                  username:
+                    type: string
+                    example: admin
+                  org:
+                    type: string
+                    nullable: true
+                  availableOrgs:
+                    type: array
+                    items:
+                      type: string
+                  authType:
+                    type: string
+                    enum: [local, oidc]
+                  email:
+                    type: string
+                    nullable: true
+                  csrfToken:
+                    type: string
+        '401':
+          description: Not authenticated
+
+  /api/switch-org:
+    post:
+      tags: [Auth]
+      summary: Switch effective org (partner multi-org)
+      description: |
+        Partner accounts granted multiple orgs via SSO groups may switch the
+        effective org. The target must be one of the orgs captured at last
+        login (`availableOrgs`). Platform accounts cannot switch.
+      operationId: switchOrg
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org]
+              properties:
+                org:
+                  type: string
+                  example: acme
+      responses:
+        '200':
+          description: Org switched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  orgId:
+                    type: string
+        '403':
+          description: Not a partner, or org not granted by SSO
+
+  # =============================================================
+  # Health
+  # =============================================================
+  /api/health:
+    get:
+      tags: [System]
+      summary: Health check
+      description: No authentication required. Used by container health check.
+      operationId: health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  # =============================================================
+  # BFF User Management (platform only)
+  # =============================================================
+  /api/bff-users:
+    get:
+      tags: [Users]
+      summary: List BFF users
+      description: Platform only. Returns all local BFF users (not Exchange users).
+      operationId: listBffUsers
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        username:
+                          type: string
+                        role:
+                          type: string
+                          enum: [platform, partner]
+                        org:
+                          type: string
+                          nullable: true
+                        createdAt:
+                          type: string
+                          format: date-time
+                        email:
+                          type: string
+                          nullable: true
+                        issuer:
+                          type: string
+                          nullable: true
+                          description: OIDC issuer (null for local accounts)
+                        subject:
+                          type: string
+                          nullable: true
+                          description: OIDC subject (null for local accounts)
+                        disabled:
+                          type: boolean
+                        bootstrap:
+                          type: boolean
+                          description: The break-glass bootstrap admin
+                        authType:
+                          type: string
+                          enum: [local, oidc]
+    post:
+      tags: [Users]
+      summary: Create BFF user
+      description: Platform only. Creates a platform or partner user.
+      operationId: createBffUser
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username:
+                  type: string
+                  example: acme
+                password:
+                  type: string
+                  example: acme123
+                role:
+                  type: string
+                  enum: [platform, partner]
+                  example: partner
+                org:
+                  type: string
+                  description: Required for partner role
+                  example: myorg
+      responses:
+        '200':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '409':
+          description: User already exists
+
+  /api/bff-users/{username}:
+    delete:
+      tags: [Users]
+      summary: Delete BFF user
+      description: |
+        Platform only. Cannot delete yourself or the bootstrap admin. OIDC users
+        are identified by the `issuer`/`subject` query params; local users are
+        identified by `username` (+ optional `org`). Set `deleteExchangeUser=true`
+        to also delete the corresponding Exchange user (local partner accounts).
+      operationId: deleteBffUser
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: org
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Disambiguates cross-org duplicate local usernames
+        - name: issuer
+          in: query
+          required: false
+          schema:
+            type: string
+          description: OIDC issuer (with subject) to delete a federated user
+        - name: subject
+          in: query
+          required: false
+          schema:
+            type: string
+          description: OIDC subject (with issuer) to delete a federated user
+        - name: deleteExchangeUser
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Also delete the matching Exchange user
+      responses:
+        '200':
+          description: User deleted
+        '400':
+          description: Cannot delete yourself or the bootstrap admin
+        '404':
+          description: User not found
+    put:
+      tags: [Users]
+      summary: Update BFF user role/org/password
+      description: Platform only. Update a user's role, bound org, or password.
+      operationId: updateBffUser
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: org
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Target Exchange org for cross-org queries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum: [platform, partner]
+                org:
+                  type: string
+                  description: New bound org for partner user
+                newPassword:
+                  type: string
+      responses:
+        '200':
+          description: User updated
+        '400':
+          description: Cannot change own role or org
+
+  /api/bff-users/{username}/password:
+    put:
+      tags: [Users]
+      summary: Change user password
+      description: Platform can change any user's password; partner can only change own.
+      operationId: changeBffUserPassword
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  example: newpass123
+      responses:
+        '200':
+          description: Password changed
+
+  /api/bff-users/{username}/disabled:
+    put:
+      tags: [Users]
+      summary: Enable/disable a BFF user
+      description: |
+        Platform only. Disabling is preferred over deletion for OIDC users
+        because deletion would be silently undone by JIT provisioning on the
+        next login. The bootstrap admin cannot be disabled. OIDC users are
+        identified by the `issuer`/`subject` query params; local users by
+        `username` (+ optional `org`).
+      operationId: setBffUserDisabled
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: org
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: issuer
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: subject
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              properties:
+                disabled:
+                  type: boolean
+      responses:
+        '200':
+          description: User updated
+        '400':
+          description: Cannot disable the bootstrap admin
+        '404':
+          description: User not found
+
+  # =============================================================
+  # Exchange Configuration (platform only)
+  # =============================================================
+  /api/exchange-config:
+    get:
+      tags: [System]
+      summary: Get Exchange configuration
+      description: Platform only. Returns the current Exchange connection settings.
+      operationId: getExchangeConfig
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Exchange config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured:
+                    type: boolean
+                  baseURL:
+                    type: string
+                    example: http://exchange.example.com:3090
+                  orgId:
+                    type: string
+                    example: myorg
+                  user:
+                    type: string
+                    description: Masked Exchange credential
+                    example: myorg/admin:***
+    put:
+      tags: [System]
+      summary: Update Exchange configuration
+      description: |
+        Platform only. Validates the new credentials against Exchange before
+        persisting. Changes propagate to all active sessions immediately.
+      operationId: updateExchangeConfig
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseURL, user, password]
+              properties:
+                baseURL:
+                  type: string
+                  example: http://exchange.example.com:3090
+                user:
+                  type: string
+                  example: myorg/admin
+                password:
+                  type: string
+                  example: WmgHbLbxWjxQifijLxMpIUNhZaPjgf
+      responses:
+        '200':
+          description: Configuration updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '401':
+          description: Exchange credential verification failed
+
+  /api/exchange-config/test:
+    post:
+      tags: [System]
+      summary: Test Exchange connection
+      description: Platform only. Validates Exchange credentials without persisting.
+      operationId: testExchangeConfig
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseURL, user, password]
+              properties:
+                baseURL:
+                  type: string
+                user:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  msg:
+                    type: string
+
+  # =============================================================
+  # System Settings (platform only)
+  # =============================================================
+  /api/settings:
+    get:
+      tags: [System]
+      summary: Get system settings
+      description: Platform only. Returns session timeout and audit retention settings.
+      operationId: getSettings
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_ttl:
+                    type: integer
+                    description: Session idle timeout in seconds
+                  session_abs_ttl:
+                    type: integer
+                    description: Session absolute timeout in seconds
+                  audit_retention_days:
+                    type: integer
+                    description: Audit log retention days (0 = unlimited)
+        '401':
+          description: Not authenticated
+        '403':
+          description: Platform role required
+    put:
+      tags: [System]
+      summary: Update system settings
+      description: Platform only. Update session timeout and audit retention parameters.
+      operationId: updateSettings
+      security:
+        - cookieAuth: []
+        - csrfAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_ttl:
+                  type: integer
+                  description: Session idle timeout in seconds
+                session_abs_ttl:
+                  type: integer
+                  description: Session absolute timeout in seconds
+                audit_retention_days:
+                  type: integer
+                  description: Audit log retention days (0 = unlimited)
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '400':
+          description: Invalid parameters
+        '401':
+          description: Not authenticated
+        '403':
+          description: Platform role required
+
+  # =============================================================
+  # Registry
+  # =============================================================
+  /api/registry/search:
+    get:
+      tags: [Registry]
+      summary: Search Docker registry for images
+      description: Searches Docker Hub or custom registry for matching images.
+      operationId: searchRegistry
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+      responses:
+        '200':
+          description: Search results
+
+  /api/registry/tags:
+    get:
+      tags: [Registry]
+      summary: List tags for a registry image
+      operationId: listRegistryTags
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: image
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Image name (e.g. library/alpine)
+      responses:
+        '200':
+          description: Tag list
+
+  /api/registry/test:
+    post:
+      tags: [Registry]
+      summary: Test registry connectivity
+      operationId: testRegistry
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                registry_url:
+                  type: string
+                registry_insecure:
+                  type: boolean
+                registry_username:
+                  type: string
+                registry_password:
+                  type: string
+      responses:
+        '200':
+          description: Test result
+
+  # =============================================================
+  # API Key Management (platform and partner)
+  # =============================================================
+  /api/apikeys:
+    get:
+      tags: [Users]
+      summary: List all API keys
+      description: Platform only. Returns all API keys across all orgs (without the plaintext secret).
+      operationId: listApiKeys
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: API key list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        org:
+                          type: string
+                        label:
+                          type: string
+                        revoked:
+                          type: boolean
+                        expiresAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        scopes:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/ApiKeyScope'
+                        createdAt:
+                          type: string
+                          format: date-time
+                        createdBy:
+                          type: string
+    post:
+      tags: [Users]
+      summary: Create API key
+      description: Platform only. Creates an API key for any org.
+      operationId: createApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org, label]
+              properties:
+                org:
+                  type: string
+                  example: myorg
+                label:
+                  type: string
+                  example: acme-prod
+                expiresInDays:
+                  type: integer
+                  example: 365
+                scopes:
+                  type: array
+                  description: |
+                    Explicit capabilities. Defaults to `partner:read`. The
+                    `model:distribute` scope can only be granted by a platform
+                    user through this endpoint; partner self-service rejects it.
+                  items:
+                    $ref: '#/components/schemas/ApiKeyScope'
+                  default: [partner:read]
+      responses:
+        '200':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  key:
+                    type: string
+                    description: Plaintext key (only returned once)
+                    example: nk_test_abc123...
+                  org:
+                    type: string
+                  scopes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKeyScope'
+
+  /api/apikeys/{id}:
+    delete:
+      tags: [Users]
+      summary: Delete API key
+      description: Platform only. Hard-deletes an API key.
+      operationId: deleteApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key deleted
+
+  /api/apikeys/{id}/renew:
+    post:
+      tags: [Users]
+      summary: Renew an API key
+      description: Platform only. Generates a new key secret for the same API key id.
+      operationId: renewApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key renewed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  key:
+                    type: string
+
+  /api/apikeys/{id}/revoke:
+    post:
+      tags: [Users]
+      summary: Revoke an API key
+      description: Platform only. Soft-revokes an API key.
+      operationId: revokeApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key revoked
+
+  /api/apikeys/{id}/key:
+    get:
+      tags: [Users]
+      summary: Get API key plaintext
+      description: Platform only. Returns the plaintext API key value.
+      operationId: getApiKeyPlaintext
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key plaintext
+
+  /api/my-apikeys:
+    get:
+      tags: [Users]
+      summary: List own API keys
+      description: Partner self-service. Returns keys for the partner's own org.
+      operationId: listMyApiKeys
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: My API keys; partner-created keys always have the partner:read scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        org: { type: string }
+                        label: { type: string }
+                        revoked: { type: boolean }
+                        expiresAt: { type: string, format: date-time, nullable: true }
+                        scopes:
+                          type: array
+                          items: { $ref: '#/components/schemas/ApiKeyScope' }
+    post:
+      tags: [Users]
+      summary: Create own API key
+      description: |
+        Partner self-service. Creates an API key for the partner's own org.
+        The key always receives `partner:read`; sending a `scopes` field
+        containing service scopes returns 403.
+      operationId: createMyApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label:
+                  type: string
+                  example: my-app
+                expiresInDays:
+                  type: integer
+      responses:
+        '200':
+          description: API key created with the default partner:read scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  key: { type: string }
+                  org: { type: string }
+                  scopes:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApiKeyScope' }
+
+  /api/my-apikeys/{id}/revoke:
+    post:
+      tags: [Users]
+      summary: Revoke own API key
+      description: Partner self-service. Soft-revokes a key.
+      operationId: revokeMyApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key revoked
+
+  /api/my-apikeys/{id}:
+    delete:
+      tags: [Users]
+      summary: Delete own API key
+      description: Partner self-service. Hard-deletes a key owned by the partner's org.
+      operationId: deleteMyApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key deleted
+
+  /api/my-apikeys/{id}/key:
+    get:
+      tags: [Users]
+      summary: Get own API key plaintext
+      description: Partner self-service. Returns the plaintext key value.
+      operationId: getMyApiKeyPlaintext
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key plaintext
+
+  /api/my-apikeys/{id}/renew:
+    post:
+      tags: [Users]
+      summary: Renew own API key
+      description: Partner self-service. Generates a new key secret.
+      operationId: renewMyApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key renewed
+
+  # =============================================================
+  # Audit Log
+  # =============================================================
+  /api/audit:
+    get:
+      tags: [System]
+      summary: Read audit log
+      description: |
+        Platform sees all orgs. Partner sees only own org.
+        Entries are sorted newest-first.
+      operationId: getAudit
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+          description: Max entries to return
+        - name: org
+          in: query
+          schema:
+            type: string
+          description: Filter by org (platform only)
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        t:
+                          type: string
+                          format: date-time
+                        type:
+                          type: string
+                          enum: [api, exchange]
+                        m:
+                          type: string
+                          description: HTTP method
+                        p:
+                          type: string
+                          description: Request path
+                        s:
+                          type: integer
+                          description: HTTP status code
+                        ms:
+                          type: integer
+                          description: Response time in ms
+                        u:
+                          type: string
+                          description: User or apikey label
+                        o:
+                          type: string
+                          description: Org
+                        op:
+                          type: string
+                          description: Human-readable operation description
+                        body:
+                          type: object
+                          nullable: true
+                        proxiedTo:
+                          type: string
+                          nullable: true
+                          description: Actual Exchange endpoint proxied to
+
+  # =============================================================
+  # Status / Version / Org Type
+  # =============================================================
+  /api/status:
+    get:
+      tags: [System]
+      summary: Organization status summary
+      operationId: getStatus
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Status summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: integer
+                  users:
+                    type: integer
+                  services:
+                    type: integer
+                  agbots:
+                    type: integer
+
+  /api/version:
+    get:
+      tags: [System]
+      summary: Exchange version
+      operationId: getVersion
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Version info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+
+  /api/org-type:
+    get:
+      tags: [System]
+      summary: Determine org type
+      description: Returns hubadmin / system / user
+      operationId: getOrgType
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Org type
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgType:
+                    type: string
+                    enum: [hubadmin, system, user]
+
+  # =============================================================
+  # Dashboard
+  # =============================================================
+  /api/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Rich dashboard payload
+      description: |
+        Returns node health, agreements, errors, version distribution,
+        notifications, exchange latency, org resources, and recent changes.
+        Platform aggregates across all orgs.
+      operationId: getDashboard
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodeHealth:
+                    type: object
+                  unhealthyNodes:
+                    type: array
+                  recentErrors:
+                    type: array
+                  activeAgreements:
+                    type: integer
+                  exchangeLatency:
+                    type: integer
+                  orgResources:
+                    type: object
+                  recentChanges:
+                    type: array
+
+  # =============================================================
+  # Organizations
+  # =============================================================
+  /api/organizations:
+    get:
+      tags: [Organizations]
+      summary: List all organizations
+      operationId: listOrganizations
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Organization list (passthrough from Exchange)
+
+  /api/organizations/{orgid}:
+    put:
+      tags: [Organizations]
+      summary: Create/update organization
+      operationId: updateOrganization
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: orgid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+    delete:
+      tags: [Organizations]
+      summary: Delete organization
+      operationId: deleteOrganization
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: orgid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Operation result
+
+  /api/organizations/{orgid}/config:
+    put:
+      tags: [Organizations]
+      summary: Update org configuration
+      description: Updates heartbeat intervals, limits, label, and description for an org.
+      operationId: updateOrgConfig
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: orgid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description:
+                  type: string
+                label:
+                  type: string
+                heartbeatIntervals:
+                  type: object
+                limits:
+                  type: object
+      responses:
+        '200':
+          description: Configuration updated
+
+  # =============================================================
+  # Exchange Users (not BFF users)
+  # =============================================================
+  /api/exchange-users:
+    get:
+      tags: [Users]
+      summary: List Exchange users in current org
+      operationId: listExchangeUsers
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Exchange user list
+
+  /api/exchange-users/{username}:
+    get:
+      tags: [Users]
+      summary: Get Exchange user detail
+      operationId: getExchangeUser
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User info
+    put:
+      tags: [Users]
+      summary: Create/update Exchange user
+      operationId: updateExchangeUser
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+    delete:
+      tags: [Users]
+      summary: Delete Exchange user
+      operationId: deleteExchangeUser
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Operation result
+
+  /api/exchange-users/{username}/apikeys:
+    post:
+      tags: [Users]
+      summary: Create Exchange user API key
+      description: Creates an API key **within Exchange** (not a BFF partner key).
+      operationId: createExchangeUserApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+
+  /api/exchange-users/{username}/apikeys/{keyid}:
+    delete:
+      tags: [Users]
+      summary: Delete Exchange user API key
+      operationId: deleteExchangeUserApiKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: keyid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Operation result
+
+  /api/exchange-users/{username}/changepw:
+    post:
+      tags: [Users]
+      summary: Change Exchange user password
+      description: Proxies to Exchange POST /orgs/{org}/users/{user}/changepw.
+      operationId: changeExchangeUserPassword
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties:
+                newPassword:
+                  type: string
+      responses:
+        '200':
+          description: Password changed
+
+  # =============================================================
+  # Nodes
+  # =============================================================
+  /api/nodes:
+    get:
+      tags: [Nodes]
+      summary: List nodes in current org
+      description: Supports `?org=` for cross-org queries.
+      operationId: listNodes
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: Node list
+
+  /api/nodes/{id}:
+    patch:
+      tags: [Nodes]
+      summary: Update node fields (pattern, userInput, etc.)
+      description: |
+        Partial update of node attributes. Only the supplied fields are changed.
+        If `pattern` field does not contain `/`, `{orgId}/` prefix is prepended.
+        `userInput` is an array of service user-input definitions, each containing
+        service identification (`serviceOrgid`, `serviceUrl`, `serviceArch`,
+        `serviceVersionRange`) and an `inputs` array of `{name, value}` pairs.
+      operationId: patchNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Node ID (org prefix stripped automatically)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pattern:
+                  type: string
+                  example: myorg/h-n
+                nodeType:
+                  type: string
+                softwareVersions:
+                  type: object
+                token:
+                  type: string
+                name:
+                  type: string
+                userInput:
+                  type: array
+                  description: Service user-input definitions
+                  items:
+                    type: object
+                    properties:
+                      serviceOrgid:
+                        type: string
+                        example: myorg
+                      serviceUrl:
+                        type: string
+                        example: busybox
+                      serviceArch:
+                        type: string
+                        example: amd64
+                      serviceVersionRange:
+                        type: string
+                        example: 1.0.0
+                      inputs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                              example: myvar
+                            value:
+                              type: string
+                              example: myvalue
+      responses:
+        '200':
+          description: Operation result
+    put:
+      tags: [Nodes]
+      summary: Create or update a node (upsert)
+      operationId: upsertNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Node created or updated
+    delete:
+      tags: [Nodes]
+      summary: Delete a node
+      operationId: deleteNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node deleted
+
+  /api/nodes/{id}/services:
+    get:
+      tags: [Nodes]
+      summary: Get services running on node
+      operationId: getNodeServices
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node services list
+
+  /api/nodes/{id}/policy:
+    get:
+      tags: [Nodes]
+      summary: Get node policy
+      operationId: getNodePolicy
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node policy
+    put:
+      tags: [Nodes]
+      summary: Update node policy
+      description: Automatically strips `lastUpdated` field.
+      operationId: updateNodePolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+
+  /api/nodes/{id}/agreements:
+    get:
+      tags: [Nodes]
+      summary: Get node agreements
+      operationId: getNodeAgreements
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Node agreements
+
+  /api/nodes/{id}/errors:
+    get:
+      tags: [Nodes]
+      summary: Get node errors
+      operationId: getNodeErrors
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node errors
+    put:
+      tags: [Nodes]
+      summary: Update node errors
+      operationId: updateNodeErrors
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Errors updated
+    delete:
+      tags: [Nodes]
+      summary: Delete node errors
+      operationId: deleteNodeErrors
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Errors deleted
+
+  /api/nodes/{id}/managementStatus:
+    get:
+      tags: [Nodes]
+      summary: Get node management status (NMP)
+      operationId: getNodeManagementStatus
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Management status
+
+  /api/nodes/{id}/status:
+    get:
+      tags: [Nodes]
+      summary: Get node status
+      operationId: getNodeStatus
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node status
+    put:
+      tags: [Nodes]
+      summary: Update node status
+      operationId: updateNodeStatus
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Status updated
+    delete:
+      tags: [Nodes]
+      summary: Delete node status
+      operationId: deleteNodeStatus
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Status deleted
+
+  /api/nodes/{id}/heartbeat:
+    post:
+      tags: [Nodes]
+      summary: Post node heartbeat
+      operationId: postNodeHeartbeat
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Heartbeat posted
+
+  /api/nodes/{id}/services_configstate:
+    post:
+      tags: [Nodes]
+      summary: Set service config state on a node
+      operationId: setNodeServicesConfigState
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Config state updated
+
+  /api/nodes/{id}/events:
+    get:
+      tags: [Nodes]
+      summary: Read node events from system log
+      description: "Filters by node ID. Default event types: container_status_change, agreement_terminated, agreement_created."
+      operationId: getNodeEvents
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: types
+          in: query
+          schema:
+            type: string
+          description: Comma-separated event types to filter
+      responses:
+        '200':
+          description: Node events
+
+  /api/nodes/{id}/transfer:
+    post:
+      tags: [Nodes]
+      summary: Transfer node to a different org
+      operationId: transferNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetOrg]
+              properties:
+                targetOrg:
+                  type: string
+      responses:
+        '200':
+          description: Node transferred
+
+  /api/nodes/{id}/agreements/{agreementId}:
+    delete:
+      tags: [Nodes]
+      summary: Cancel a specific agreement on a node
+      operationId: deleteNodeAgreement
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agreementId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agreement cancelled
+
+  /api/nodes/bulk/delete:
+    post:
+      tags: [Nodes]
+      summary: Delete multiple nodes
+      operationId: bulkDeleteNodes
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds]
+              properties:
+                nodeIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Bulk delete results
+
+  /api/nodes/bulk/set-pattern:
+    post:
+      tags: [Nodes]
+      summary: Set pattern on multiple nodes
+      operationId: bulkSetNodePattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds, pattern]
+              properties:
+                nodeIds:
+                  type: array
+                  items:
+                    type: string
+                pattern:
+                  type: string
+      responses:
+        '200':
+          description: Pattern set on nodes
+
+  /api/nodes/bulk/set-policy:
+    post:
+      tags: [Nodes]
+      summary: Set policy on multiple nodes
+      operationId: bulkSetNodePolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds, policy]
+              properties:
+                nodeIds:
+                  type: array
+                  items:
+                    type: string
+                policy:
+                  type: object
+      responses:
+        '200':
+          description: Policy set on nodes
+
+  # =============================================================
+  # Search
+  # =============================================================
+  /api/search/nodes/service:
+    post:
+      tags: [Search]
+      summary: Search nodes by service
+      operationId: searchNodesByService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Matching nodes
+
+  /api/search/nodes/error:
+    post:
+      tags: [Search]
+      summary: Search nodes by error
+      operationId: searchNodesByError
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Matching nodes
+
+  /api/search/nodes/error/all:
+    get:
+      tags: [Search]
+      summary: Get all node errors
+      operationId: getAllNodeErrors
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: All node errors
+
+  /api/search/nodehealth:
+    post:
+      tags: [Search]
+      summary: Search node health
+      operationId: searchNodeHealth
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Node health results
+
+  /api/policies/{id}/search:
+    post:
+      tags: [Search]
+      summary: Search nodes compatible with a deployment policy
+      operationId: searchPolicyCompatibleNodes
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Compatible nodes
+
+  /api/patterns/{id}/search:
+    post:
+      tags: [Search]
+      summary: Search nodes compatible with a deployment pattern
+      operationId: searchPatternCompatibleNodes
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Compatible nodes
+
+  # =============================================================
+  # Changes / Notifications
+  # =============================================================
+  /api/changes:
+    post:
+      tags: [Changes]
+      summary: Post changes notification
+      operationId: postChanges
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Changes posted
+
+  /api/changes/maxchangeid:
+    get:
+      tags: [Changes]
+      summary: Get max change ID
+      operationId: getMaxChangeId
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Max change ID
+
+  /api/myorgs:
+    post:
+      tags: [System]
+      summary: Get my organizations
+      operationId: getMyOrgs
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: My orgs
+
+  # =============================================================
+  # Services
+  # =============================================================
+  /api/services:
+    get:
+      tags: [Services]
+      summary: List services
+      description: Supports `?org=` for cross-org queries.
+      operationId: listServices
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: Service list
+    post:
+      tags: [Services]
+      summary: Create service
+      description: |
+        Auto-signs deployment with RSA-PSS SHA-256 and uploads public key.
+        Strips `lastUpdated` / `owner` / `name` / `organization` fields.
+        `deployment` is auto-stringified if passed as an object.
+      operationId: createService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceBody'
+      responses:
+        '201':
+          description: Created successfully
+
+  /api/services/{id}:
+    put:
+      tags: [Services]
+      summary: Update service
+      description: |
+        Always re-signs deployment and uploads a new public key when `deployment` is present.
+        Supports `?org=` for cross-org updates.
+      operationId: updateService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Service ID (without org prefix; org passed via `?org=`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceBody'
+      responses:
+        '200':
+          description: Updated successfully
+    delete:
+      tags: [Services]
+      summary: Delete service
+      operationId: deleteService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deleted successfully
+    get:
+      tags: [Services]
+      summary: Get a single service
+      operationId: getService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service detail
+
+  /api/services/{id}/keys:
+    get:
+      tags: [Services]
+      summary: List service public keys
+      operationId: listServiceKeys
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service keys
+    post:
+      tags: [Services]
+      summary: Upload a service public key
+      operationId: uploadServiceKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Key uploaded
+
+  /api/services/{id}/keys/{keyId}:
+    delete:
+      tags: [Services]
+      summary: Delete a service public key
+      operationId: deleteServiceKey
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Key deleted
+
+  /api/services/{id}/resign:
+    post:
+      tags: [Services]
+      summary: Re-sign service deployment with new key pair
+      operationId: resignService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service re-signed
+
+  /api/services/{id}/dockauths:
+    get:
+      tags: [Services]
+      summary: List service Docker auths
+      operationId: listServiceDockAuths
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Docker auths list
+    post:
+      tags: [Services]
+      summary: Create service Docker auth
+      operationId: createServiceDockAuth
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Docker auth created
+
+  /api/services/{id}/dockauths/{authId}:
+    delete:
+      tags: [Services]
+      summary: Delete service Docker auth
+      operationId: deleteServiceDockAuth
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: authId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Docker auth deleted
+
+  /api/services/{id}/archive:
+    post:
+      tags: [Services]
+      summary: Archive a service (soft delete)
+      operationId: archiveService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service archived
+
+  /api/services/{id}/unarchive:
+    post:
+      tags: [Services]
+      summary: Unarchive a service
+      operationId: unarchiveService
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service unarchived
+
+  /api/services/{id}/upgrade:
+    post:
+      tags: [Services]
+      summary: Set service upgrade policy
+      operationId: setUpgradePolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                auto_upgrade:
+                  type: boolean
+                active_upgrade:
+                  type: boolean
+      responses:
+        '200':
+          description: Upgrade policy set
+
+  # =============================================================
+  # Patterns
+  # =============================================================
+  /api/patterns:
+    get:
+      tags: [Patterns]
+      summary: List deployment patterns
+      description: Supports `?org=`.
+      operationId: listPatterns
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: Pattern list
+    post:
+      tags: [Patterns]
+      summary: Create deployment pattern
+      description: |
+        Strips `name` field from body (used as URL path).
+        Uses `patternBody` whitelist.
+      operationId: createPattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: h-n
+                label:
+                  type: string
+                description:
+                  type: string
+                public:
+                  type: boolean
+                services:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PService'
+                userInput:
+                  type: array
+                  items:
+                    type: object
+                agreementProtocols:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '200':
+          description: Create result
+
+  /api/patterns/{id}:
+    put:
+      tags: [Patterns]
+      summary: Update deployment pattern
+      description: Uses `patternBody` whitelist.
+      operationId: updatePattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Update result
+    delete:
+      tags: [Patterns]
+      summary: Delete deployment pattern
+      operationId: deletePattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete result
+
+  /api/patterns/{id}/nodehealth:
+    post:
+      tags: [Patterns]
+      summary: Get node health for a pattern
+      operationId: getPatternNodeHealth
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Node health results
+
+  # =============================================================
+  # Deployment Policies
+  # =============================================================
+  /api/policies:
+    get:
+      tags: [Deployment Policies]
+      summary: List deployment policies
+      description: Supports `?org=`.
+      operationId: listPolicies
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: Policy list
+    post:
+      tags: [Deployment Policies]
+      summary: Create deployment policy
+      description: Strips `name` field, uses `sanitizeBody` filtering.
+      operationId: createPolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                label:
+                  type: string
+                description:
+                  type: string
+                businessPolicy:
+                  type: object
+      responses:
+        '200':
+          description: Create result
+
+  /api/policies/{id}:
+    put:
+      tags: [Deployment Policies]
+      summary: Update deployment policy
+      operationId: updatePolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Update result
+    delete:
+      tags: [Deployment Policies]
+      summary: Delete deployment policy
+      operationId: deletePolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete result
+
+  # =============================================================
+  # Management Policies
+  # =============================================================
+  /api/mgmtpolicies:
+    get:
+      tags: [Management Policies]
+      summary: List management policies
+      operationId: listMgmtPolicies
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Management policy list
+    post:
+      tags: [Management Policies]
+      summary: Create management policy
+      operationId: createMgmtPolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                label:
+                  type: string
+                description:
+                  type: string
+                enabled:
+                  type: boolean
+                constraints:
+                  type: array
+                  items:
+                    type: string
+                properties:
+                  type: array
+                  items:
+                    type: object
+                pattern:
+                  type: string
+                businessPolicy:
+                  type: string
+                agentUpgradePolicy:
+                  type: object
+                startWindow:
+                  type: string
+                jsonFormats:
+                  type: object
+      responses:
+        '201':
+          description: Created successfully
+
+  /api/mgmtpolicies/{id}:
+    put:
+      tags: [Management Policies]
+      summary: Update management policy
+      operationId: updateMgmtPolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Update result
+    delete:
+      tags: [Management Policies]
+      summary: Delete management policy
+      operationId: deleteMgmtPolicy
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete result
+
+  /api/mgmtpolicies/{id}/status:
+    get:
+      tags: [Management Policies]
+      summary: Get NMP (Node Management Policy) status detail
+      operationId: getMgmtPolicyStatus
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: NMP status detail
+
+  # =============================================================
+  # Catalog
+  # =============================================================
+  /api/catalog-services:
+    get:
+      tags: [Catalog]
+      summary: List catalog services
+      description: Returns services from public orgs (IBM, etc.).
+      operationId: listCatalogServices
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Catalog service list
+
+  /api/catalog-patterns:
+    get:
+      tags: [Catalog]
+      summary: List catalog patterns
+      operationId: listCatalogPatterns
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Catalog pattern list
+
+  # =============================================================
+  # Agbots
+  # =============================================================
+  /api/agbots:
+    get:
+      tags: [Agbots]
+      summary: List agbots
+      description: Supports `?org=`. Automatically merges IBM org agbots.
+      operationId: listAgbots
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+      responses:
+        '200':
+          description: Agbot list
+
+  /api/agbots/{id}:
+    put:
+      tags: [Agbots]
+      summary: Create/update agbot
+      operationId: updateAgbot
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+    patch:
+      tags: [Agbots]
+      summary: Partial update agbot
+      operationId: patchAgbot
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Operation result
+    delete:
+      tags: [Agbots]
+      summary: Delete agbot
+      operationId: deleteAgbot
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Operation result
+
+  /api/agbots/{id}/patterns:
+    get:
+      tags: [Agbot Patterns]
+      summary: List patterns bound to agbot
+      operationId: listAgbotPatterns
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pattern list
+    post:
+      tags: [Agbot Patterns]
+      summary: Bind pattern to agbot
+      description: Auto-fills `nodeOrgid` defaults.
+      operationId: bindAgbotPattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [patternOrgid, pattern, nodeOrgid]
+              properties:
+                patternOrgid:
+                  type: string
+                pattern:
+                  type: string
+                nodeOrgid:
+                  type: string
+      responses:
+        '200':
+          description: Bind success
+
+  /api/agbots/{id}/patterns/{patternId}:
+    delete:
+      tags: [Agbot Patterns]
+      summary: Unbind agbot pattern
+      operationId: unbindAgbotPattern
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: patternId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Full Exchange key (e.g. myorg_h-n_myorg)
+      responses:
+        '200':
+          description: Unbind success
+
+  /api/agbots/{id}/businesspols:
+    get:
+      tags: [Agbot Business Policies]
+      summary: List business policies bound to agbot
+      operationId: listAgbotBusinessPols
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Policy list
+    post:
+      tags: [Agbot Business Policies]
+      summary: Bind business policy to agbot
+      operationId: bindAgbotBusinessPol
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [businessPolOrgid, businessPol, nodeOrgid]
+              properties:
+                businessPolOrgid:
+                  type: string
+                businessPol:
+                  type: string
+                nodeOrgid:
+                  type: string
+      responses:
+        '200':
+          description: Bind success
+
+  /api/agbots/{id}/businesspols/{polId}:
+    delete:
+      tags: [Agbot Business Policies]
+      summary: Unbind agbot business policy
+      operationId: unbindAgbotBusinessPol
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: polId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Unbind success
+
+  /api/agbots/admin-login:
+    post:
+      tags: [Agbots]
+      summary: Authenticate as agbot admin
+      description: Verifies credentials against Exchange and returns base64 auth token. Does not create a session.
+      operationId: agbotAdminLogin
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user, password]
+              properties:
+                user:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Auth token
+
+  /api/agbots/{id}/agreements:
+    get:
+      tags: [Agbots]
+      summary: List agreements for an agbot
+      description: Enriches each agreement with node container state and config state.
+      operationId: listAgbotAgreements
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/OrgQuery'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agreement list
+
+  /api/agbots/{id}/heartbeat:
+    post:
+      tags: [Agbots]
+      summary: Post agbot heartbeat
+      operationId: postAgbotHeartbeat
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Heartbeat posted
+
+  /api/agbots/{id}/msgs:
+    get:
+      tags: [Agbots]
+      summary: Get agbot messages
+      operationId: getAgbotMessages
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agbot messages
+    post:
+      tags: [Agbots]
+      summary: Send agbot message
+      operationId: sendAgbotMessage
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Message sent
+
+  # =============================================================
+  # HA Groups
+  # =============================================================
+  /api/hagroups:
+    get:
+      tags: [HA Groups]
+      summary: List HA groups
+      description: Returns an object keyed by group name.
+      operationId: listHaGroups
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: HA groups list
+
+  /api/hagroups/{id}:
+    get:
+      tags: [HA Groups]
+      summary: Get a single HA group
+      operationId: getHaGroup
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: HA group detail
+    post:
+      tags: [HA Groups]
+      summary: Create HA group
+      description: |
+        Uses HTTP POST (Exchange requires POST for node group creation).
+        Only `description` and optional `network` are accepted.
+        `name` is taken from the path.
+      operationId: createHaGroup
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description:
+                  type: string
+                network:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+      responses:
+        '201':
+          description: Created successfully
+    delete:
+      tags: [HA Groups]
+      summary: Delete HA group
+      operationId: deleteHaGroup
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deleted successfully
+
+  /api/hagroups/{id}/nodes/{nodeId}:
+    put:
+      tags: [HA Groups]
+      summary: Add node to HA group
+      operationId: addHaGroupNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: nodeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node added
+    delete:
+      tags: [HA Groups]
+      summary: Remove node from HA group
+      operationId: removeHaGroupNode
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: nodeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node removed
+
+  # =============================================================
+  # Agent File Version
+  # =============================================================
+  /api/agentfileversion:
+    get:
+      tags: [Agent File Version]
+      summary: Get agent file version
+      operationId: getAgentFileVersion
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Agent file version
+    put:
+      tags: [Agent File Version]
+      summary: Set agent file version
+      operationId: setAgentFileVersion
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Version set
+    delete:
+      tags: [Agent File Version]
+      summary: Delete agent file version
+      operationId: deleteAgentFileVersion
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Version deleted
+
+  # =============================================================
+  # Secrets
+  # =============================================================
+  /api/secrets:
+    get:
+      tags: [Secrets]
+      summary: List secrets
+      description: Returns empty object. Secrets are managed by Vault/OpenBao, not Exchange.
+      operationId: listSecrets
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Secret list
+    post:
+      tags: [Secrets]
+      summary: Create secret
+      description: Stub endpoint. Returns 400 with message to use Secrets Manager.
+      operationId: createSecret
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '400':
+          description: Secrets not managed through Exchange
+
+  /api/secrets/{name}:
+    delete:
+      tags: [Secrets]
+      summary: Delete secret
+      description: Stub endpoint. Returns 400 with message to use Secrets Manager.
+      operationId: deleteSecret
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '400':
+          description: Secrets not managed through Exchange
+
+  # =============================================================
+  # Service Instances
+  # =============================================================
+  /api/service-instances:
+    get:
+      tags: [Service Instances]
+      summary: List all service instances across nodes and orgs
+      description: Aggregates across all nodes and enriches with node status.
+      operationId: listServiceInstances
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      responses:
+        '200':
+          description: Service instance list
+
+  /api/service-instances/{id}:
+    get:
+      tags: [Service Instances]
+      summary: Get a specific service instance
+      description: Instance ID format is nodeId/serviceKey.
+      operationId: getServiceInstance
+      security:
+        - SessionCookie: []
+        - CsrfToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service instance detail
+
+  # =============================================================
+  # NereidSphere integration (machine-to-machine via NS gateway)
+  # =============================================================
+  /v1/integration/ns/tenants:
+    get:
+      tags: [NereidSphere Integration]
+      summary: List tenants (Exchange orgs) for the NS admin console
+      description: |
+        Called by the NereidSphere admin console **through the NS gateway**
+        (`/p/horizon/v1/integration/ns/tenants`). The gateway strips inbound
+        copies and stamps `X-NS-Integration-Secret` (this product's SSO secret)
+        and the verified `X-User-Roles` header; no browser session is involved.
+        Deliberately outside `/api/` so the regular session/CSRF guards do not
+        apply.
+      operationId: listIntegrationTenants
+      parameters:
+        - name: X-NS-Integration-Secret
+          in: header
+          required: true
+          description: Product SSO secret, stamped by the NS gateway only.
+          schema:
+            type: string
+        - name: X-User-Roles
+          in: header
+          required: true
+          description: Comma-joined NS suite roles; must contain `admin` or `operator`.
+          schema:
+            type: string
+            example: admin,user
+      responses:
+        '200':
+          description: Exchange org list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    tenant_id:
+                      type: string
+                    tenant_name:
+                      type: string
+                  required: [tenant_id, tenant_name]
+              example:
+                - tenant_id: myorg
+                  tenant_name: myorg
+                - tenant_id: acme-labs
+                  tenant_name: acme-labs
+        '401':
+          description: Missing or wrong integration secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller lacks the admin/operator suite role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Exchange org list unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/forge/status:
+    get:
+      tags: [Model Distribution]
+      summary: NereidForge + ESS connectivity status
+      description: |
+        Platform only. Returns whether the NereidForge service account is
+        configured/authenticated and whether the Cloud Sync Service (ESS/CSS)
+        is reachable. The Forge token and Exchange credentials are never returned.
+      responses:
+        '200':
+          description: Integration status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  forge:
+                    type: object
+                    properties:
+                      configured: { type: boolean }
+                      baseUrl: { type: string }
+                      authenticated: { type: boolean }
+                      error: { type: string }
+                  ess:
+                    type: object
+                    properties:
+                      baseUrl: { type: string }
+                      reachable: { type: boolean }
+                      error: { type: string }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/forge/test:
+    post:
+      tags: [Model Distribution]
+      summary: Validate Forge connection settings with a real login
+      description: |
+        Platform only. Performs a captcha + password login against NereidForge.
+        A blank `password` reuses the already-stored service-account secret.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_url, username]
+              properties:
+                base_url: { type: string, example: 'http://nereidforge-host:8000' }
+                username: { type: string }
+                password: { type: string }
+                namespace: { type: string }
+                tenant: { type: string, default: default }
+      responses:
+        '200':
+          description: Login succeeded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/forge/models:
+    get:
+      tags: [Model Distribution]
+      summary: List NereidForge models (proxied, paged)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 50 } }
+        - { name: search, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Paged model list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ForgeModel' }
+                  total: { type: integer }
+                  page: { type: integer }
+                  page_size: { type: integer }
+                  total_pages: { type: integer }
+        '409': { $ref: '#/components/responses/NotConfigured' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/forge/models/{name}/versions:
+    get:
+      tags: [Model Distribution]
+      summary: List a NereidForge model's versions (newest first)
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Paged version list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ForgeVersion' }
+                  total: { type: integer }
+        '409': { $ref: '#/components/responses/NotConfigured' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/forge/models/{name}/versions/{version}/packages:
+    get:
+      tags: [Model Distribution]
+      summary: List a version's ready precision packages
+      description: |
+        Platform only. Read-only proxy of the Forge endpoint. Forge builds
+        precision packages (fp32/fp16/int8) automatically at the end of an
+        optimization job — there is no build-trigger API; this returns ready
+        packages only, with quality-gate and per-device verification data.
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: version, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Ready precision packages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  packages:
+                    type: array
+                    items: { $ref: '#/components/schemas/ForgePackageRecord' }
+        '409': { $ref: '#/components/responses/NotConfigured' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/destinations:
+    get:
+      tags: [Model Distribution]
+      summary: List ESS destinations (registered edge nodes) of an org
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ESS destination list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MmsDestination' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/objects:
+    get:
+      tags: [Model Distribution]
+      summary: List all MMS objects of an org across every object type
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: MMS object metadata list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MmsObject' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/objects/{type}/{id}/destinations:
+    get:
+      tags: [Model Distribution]
+      summary: Per-destination delivery status of one MMS object
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+        - { name: type, in: path, required: true, schema: { type: string } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Delivery status list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MmsDestStatus' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/objects/{type}/{id}:
+    delete:
+      tags: [Model Distribution]
+      summary: Delete an MMS object (metadata + data)
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+        - { name: type, in: path, required: true, schema: { type: string } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/publish:
+    post:
+      tags: [Model Distribution]
+      summary: Publish a Forge precision package to edge nodes through ESS
+      description: |
+        Platform only. Requires a non-root `org` query parameter. The payload
+        is exactly the gzip tar Forge produced automatically for
+        `precision` at optimization-job end; the BFF streams it from Forge
+        into ESS byte-for-byte without disk or whole-model buffering and never
+        repackages anything. The precision package must exist and be ready
+        (Forge 404/409 otherwise); the call stays open until the upload
+        finishes. NereidInference on the edge extracts and installs the
+        package after ESS lands it.
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [modelName, version, precision, objectType, objectID, destinations]
+              properties:
+                modelName: { type: string }
+                version: { type: string }
+                precision: { type: string, enum: [fp32, fp16, int8], example: fp16 }
+                objectType: { type: string, example: openvino }
+                objectID: { type: string, example: yolov8n-fp16 }
+                destinations:
+                  type: array
+                  items: { type: string, example: 'edgex:NUC' }
+                description: { type: string }
+      responses:
+        '200':
+          description: Publish accepted and data uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  objectType: { type: string }
+                  objectID: { type: string }
+                  bytes:
+                    type: integer
+                    description: Package size in bytes (from the Forge Content-Length; 0 if absent).
+                  destinationCount: { type: integer }
+                  precision: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/NotConfigured' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/upload:
+    post:
+      tags: [Model Distribution]
+      summary: Validate and distribute an operator-uploaded standard model package
+      description: |
+        Platform only. Requires a non-root `org` query parameter and CSRF.
+        Exactly one multipart file field named `package` contains the original
+        `.tar.gz`; `destinations` is a JSON-encoded string array. The BFF spools
+        to a private temporary file, validates `nereid-model/1`, safe entries,
+        complete artifact declarations, exact sizes and SHA-256 digests, then
+        streams the unchanged bytes to ESS. The spool is removed on success and
+        failure. `operationID` correlates all audit stages for this operation.
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [package, objectType, objectID, destinations]
+              properties:
+                package: { type: string, format: binary }
+                objectType: { type: string, example: openvino }
+                objectID: { type: string, example: demo-1.2.3-a1b2c3d4 }
+                destinations:
+                  type: string
+                  example: '["edgex:node1"]'
+                  description: JSON-encoded ESS destinationType:destinationID string array.
+                description: { type: string }
+      responses:
+        '200':
+          description: Package validated and original bytes uploaded to ESS
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomPackageResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Compressed package exceeds MMS_UPLOAD_MAX_BYTES
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /api/mms/from-url:
+    post:
+      tags: [Model Distribution]
+      summary: Download, validate and distribute a standard model package from a URL
+      description: |
+        Platform only. The URL must be HTTP(S), must not contain embedded
+        credentials, and its Origin must appear in
+        `MMS_MODEL_URL_ALLOWED_ORIGINS`. Redirects are limited and each target
+        Origin is revalidated. Signed query strings are used for the download
+        but never returned or audited; only the final Origin is recorded and the
+        remote path is not used as a filename. The downloaded package follows
+        exactly the same spool, validation, ESS
+        byte-stream and cleanup transaction as a local upload.
+      parameters:
+        - { name: org, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, objectType, objectID, destinations]
+              properties:
+                url: { type: string, format: uri }
+                objectType: { type: string, example: openvino }
+                objectID: { type: string, example: demo-1.2.3-a1b2c3d4 }
+                destinations:
+                  type: array
+                  items: { type: string, example: 'edgex:node1' }
+                description: { type: string }
+      responses:
+        '200':
+          description: URL package validated and original bytes uploaded to ESS
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomPackageResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: Download exceeds MMS_UPLOAD_MAX_BYTES
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: URL distribution has no configured allowed Origins
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # =============================================================
+  # Service-to-service model distribution API (scoped API key)
+  # =============================================================
+  /api/service/v1/orgs/{org}/model-publications:
+    post:
+      tags: [Service Model API]
+      summary: Publish one ready Forge precision package through ESS
+      description: |
+        Service-to-service endpoint authenticated with an `X-Api-Key` that
+        contains the `model:distribute` scope. It does not accept console
+        session cookies and does not require CSRF tokens.
+
+        The key is bound to one org; `{org}` must match that binding and must
+        not be `root`. NH uses its stored Exchange credential to publish, then
+        independently reads the stored ESS bytes and verifies both SHA-256 and
+        byte count against the Forge package record. On mismatch, NH deletes
+        the newly created ESS object and returns 502.
+
+        A successful response means `acceptance: "ess_received"` and
+        `edgeReady: false`: ESS has received the bytes, but edge nodes have not
+        necessarily received or consumed the object. Poll the destination
+        endpoint for terminal delivery state.
+      operationId: createServiceModelPublication
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+          example: myorg
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelPublicationRequest'
+      responses:
+        '200':
+          description: ESS received the package and the stored bytes matched the Forge record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelPublicationResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Forge is not configured, the requested precision package is not ready, or an ESS object with the same type and id already exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: Forge/ESS transport failed or stored ESS bytes failed integrity verification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/service/v1/orgs/{org}/objects/{type}/{id}/destinations:
+    get:
+      tags: [Service Model API]
+      summary: Query per-destination delivery state of one ESS model object
+      description: |
+        Requires the same org-bound `model:distribute` API key. `edgeReady` is
+        true only when every reported destination is `delivered` or
+        `consumed`. An empty or pending destination list remains
+        `in_progress`; ESS acceptance alone is never reported as edge ready.
+      operationId: getServiceObjectDestinations
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+          example: face-detection
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: yunet-fp16
+      responses:
+        '200':
+          description: Aggregate delivery state and raw ESS destination records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectDeliveryStatus'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ----- nh-model-distribution/v1: idempotent ensure task contract -----
+  /api/service/v1/orgs/{org}/distribution-tasks:
+    post:
+      tags: [Service Model API]
+      summary: Ensure one model package is distributed (idempotent task handle)
+      description: |
+        Versioned idempotent distribution contract (`nh-model-distribution/v1`),
+        authenticated with the same org-bound `model:distribute` API key as the
+        legacy model-publications endpoint.
+
+        The idempotency key is the ESS object identity (`org` + `objectType` +
+        `objectID`). A repeated call while a task is active (`in_progress` or
+        `delivered`) returns that same task with `idempotentReplay: true` and
+        never republishes. When the ESS object already exists without a task
+        (legacy publication or manual preload), NH verifies its bytes against
+        the Forge package digest and adopts it (`adopted: true`) instead of
+        returning the legacy duplicate 409; mismatched bytes still return 409.
+
+        `precision` (fp32/fp16/int8) is the hardware-aware payload selector: one IR
+        per precision serves every edge device, so no per-application parameter
+        exists. A created task answers `201`; an idempotent replay answers
+        `200`. Terminal tasks (`failed`/`cancelled`/`rolled_back`) release the
+        idempotency key, so a later ensure may create a new task.
+      operationId: ensureDistributionTask
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+          example: myorg
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DistributionTaskRequest'
+      responses:
+        '200':
+          description: Idempotent replay of the existing active task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DistributionTask'
+        '201':
+          description: Task created (fresh publication or verified ESS adoption)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DistributionTask'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Forge not configured, precision package not ready, or an existing ESS object has mismatched bytes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/service/v1/orgs/{org}/distribution-tasks/{taskId}:
+    get:
+      tags: [Service Model API]
+      summary: Poll one distribution task and its live ESS delivery state
+      description: |
+        Returns the task handle. Active tasks are refreshed from ESS: the task
+        flips to `delivered` once every destination reports `delivered` or
+        `consumed`, after which no further ESS calls are made. Terminal tasks
+        are served from the database.
+      operationId: getDistributionTask
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: dt_1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+      responses:
+        '200':
+          description: Task handle with delivery state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DistributionTask'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown task id in this org
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/service/v1/orgs/{org}/distribution-tasks/{taskId}/cancel:
+    post:
+      tags: [Service Model API]
+      summary: Cancel an in-flight distribution and delete its ESS object
+      description: |
+        Legal only while the task is `in_progress`. NH first checks live ESS
+        destinations: if every destination already delivered, the task flips
+        to `delivered` and the call answers 409 directing the caller to
+        rollback. Otherwise the ESS object is deleted (an already-gone object
+        is treated as success) and the task becomes `cancelled`, releasing
+        the idempotency key.
+      operationId: cancelDistributionTask
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task cancelled and ESS object deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DistributionTask'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown task id in this org
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Task already delivered or not cancellable in its current state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/service/v1/orgs/{org}/distribution-tasks/{taskId}/rollback:
+    post:
+      tags: [Service Model API]
+      summary: Roll back a delivered distribution by deleting its ESS object
+      description: |
+        Legal only for a `delivered` task. The ESS object is deleted so edge
+        nodes drop it; an already-gone object (404) counts as success. The
+        task becomes `rolled_back` and releases the idempotency key.
+      operationId: rollbackDistributionTask
+      security:
+        - ServiceApiKey: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Distribution rolled back and ESS object deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DistributionTask'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/AuthError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown task id in this org
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Task is not in the delivered state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503':
+          description: Exchange is not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  responses:
+    AuthError:
+      description: Not authenticated
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Insufficient role or permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadGateway:
+      description: Upstream (NereidForge or ESS) failure
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotConfigured:
+      description: Integration is not configured
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: nereid_sid
+      description: HttpOnly; SameSite=Strict session cookie issued on login.
+    CsrfToken:
+      type: apiKey
+      in: header
+      name: X-Csrf-Token
+      description: CSRF token (hex string) returned by login. Required on all mutating requests (POST/PUT/PATCH/DELETE) that carry a session cookie.
+    ServiceApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Org-bound NH API key. Service model API calls require the
+        `model:distribute` scope and are authenticated independently of console
+        session cookies and CSRF tokens.
+
+  parameters:
+    OrgQuery:
+      name: org
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Target org ID for cross-org queries
+      example: myorg
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        msg:
+          type: string
+        operationID:
+          type: string
+          description: Present for custom-package failures; correlates audit stages.
+      required: [msg]
+    ApiKeyScope:
+      type: string
+      enum: [partner:read, model:distribute]
+      description: |
+        partner:read permits only the read-only partner API;
+        model:distribute permits the narrow service-to-service model API.
+    ModelPublicationRequest:
+      type: object
+      required: [modelName, version, precision, objectType, objectID, destinations]
+      properties:
+        modelName: { type: string, example: yunet }
+        version: { type: string, example: '0.0.1' }
+        precision: { type: string, enum: [fp32, fp16, int8], example: fp16 }
+        objectType: { type: string, example: face-detection }
+        objectID:
+          type: string
+          example: yunet-fp16
+          description: Unique ESS object id within objectType. Existing identities return 409; use distinct ids for distinct packages.
+        destinations:
+          type: array
+          minItems: 1
+          items: { type: string, example: 'openhorizon.edgenode:node1' }
+        description: { type: string }
+    ModelPublicationResponse:
+      type: object
+      required:
+        [objectType, objectID, bytes, destinationCount, precision, packageSHA256,
+         storedObject, byteIntegrity, acceptance, edgeReady]
+      properties:
+        objectType: { type: string }
+        objectID: { type: string }
+        modelName: { type: string }
+        version: { type: string }
+        precision: { type: string, enum: [fp32, fp16, int8] }
+        bytes: { type: integer, description: Forge package byte count. }
+        destinationCount: { type: integer }
+        packageSHA256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        storedObject:
+          type: object
+          required: [sha256, bytes]
+          properties:
+            sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+            bytes: { type: integer }
+        byteIntegrity: { type: string, enum: [match] }
+        acceptance:
+          type: string
+          enum: [ess_received]
+          description: ESS has received and stored the bytes; it is not an edge-ready state.
+        edgeReady:
+          type: boolean
+          enum: [false]
+          description: Always false in the publication response. Poll destination status to determine edge readiness.
+    ObjectDeliveryStatus:
+      type: object
+      required: [org, objectType, objectID, deliveryState, edgeReady, destinations]
+      properties:
+        org: { type: string }
+        objectType: { type: string }
+        objectID: { type: string }
+        deliveryState:
+          type: string
+          enum: [in_progress, delivered, error]
+        edgeReady:
+          type: boolean
+          description: True only when every destination status is delivered or consumed.
+        destinations:
+          type: array
+          items: { $ref: '#/components/schemas/MmsDestStatus' }
+    DistributionTaskRequest:
+      type: object
+      description: Ensure request for nh-model-distribution/v1. Same envelope as ModelPublicationRequest; the ESS object identity is the idempotency key.
+      required: [modelName, version, precision, objectType, objectID, destinations]
+      properties:
+        modelName: { type: string, example: yunet }
+        version: { type: string, example: '0.0.1' }
+        precision:
+          type: string
+          enum: [fp32, fp16, int8]
+          example: fp16
+          description: Hardware-aware payload selector; one IR per precision serves every edge device.
+        objectType: { type: string, example: face-detection }
+        objectID:
+          type: string
+          example: yunet-fp16
+          description: ESS object id unique within objectType; together with org and objectType it is the ensure idempotency key.
+        destinations:
+          type: array
+          minItems: 1
+          items: { type: string, example: 'openhorizon.edgenode:node1' }
+        description: { type: string }
+    DistributionTask:
+      type: object
+      required:
+        [taskId, org, objectType, objectID, modelName, version, precision,
+         destinations, state, deliveryState, edgeReady, failureReason,
+         packageSHA256, packageBytes, createdAt, updatedAt, deliveredAt, finishedAt]
+      properties:
+        taskId:
+          type: string
+          example: dt_1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+          description: Opaque pollable task handle.
+        org: { type: string }
+        objectType: { type: string }
+        objectID: { type: string }
+        modelName: { type: string }
+        version: { type: string }
+        precision: { type: string, enum: [fp32, fp16, int8] }
+        destinations:
+          type: array
+          items: { type: string }
+          description: Requested destination ids captured at ensure time.
+        state:
+          type: string
+          enum: [in_progress, delivered, failed, cancelled, rolled_back]
+          description: Task lifecycle state. in_progress and delivered hold the idempotency key.
+        deliveryState:
+          type: string
+          enum: [in_progress, delivered, error, cancelled, rolled_back]
+          description: ESS-derived aggregate delivery for active tasks; mirrors state for terminal tasks.
+        edgeReady:
+          type: boolean
+          description: True only when every destination status is delivered or consumed.
+        delivery:
+          type: array
+          description: Raw ESS destination records from the latest refresh; empty for terminal tasks.
+          items: { $ref: '#/components/schemas/MmsDestStatus' }
+        failureReason: { type: string, nullable: true }
+        packageSHA256: { type: string, nullable: true, pattern: '^[0-9a-f]{64}$' }
+        packageBytes: { type: integer, nullable: true }
+        idempotentReplay:
+          type: boolean
+          description: Present and true when the ensure call returned an existing active task.
+        adopted:
+          type: boolean
+          description: Present and true when an already-existing verified ESS object was adopted into a task.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deliveredAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+    CustomPackageResult:
+      type: object
+      required: [operationID, objectType, objectID, bytes, destinationCount, packageSHA256, expandedBytes, fileCount, modelID, modelVersion, originalFilename, source]
+      properties:
+        operationID: { type: string, format: uuid }
+        objectType: { type: string }
+        objectID: { type: string }
+        bytes: { type: integer, description: Original compressed package size. }
+        destinationCount: { type: integer }
+        packageSHA256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        expandedBytes: { type: integer }
+        fileCount: { type: integer, description: Regular-file count including the root descriptor. }
+        modelID: { type: string }
+        modelVersion: { type: string }
+        originalFilename:
+          type: string
+          description: Local filename for uploads; empty for URL sources so remote paths are never disclosed or audited.
+        source: { type: string, enum: [custom-upload, url] }
+        sourceOrigin:
+          type: string
+          format: uri
+          description: Final URL Origin only; never includes path, query, or credentials.
+    ForgeModel:
+      type: object
+      description: NereidForge model registry entry (UI fields subset)
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        framework: { type: string }
+        task_type: { type: string }
+        created_at: { type: string, nullable: true }
+        updated_at: { type: string, nullable: true }
+        versions:
+          type: array
+          items: { $ref: '#/components/schemas/ForgeVersion' }
+    ForgeVersion:
+      type: object
+      properties:
+        version: { type: string }
+        description: { type: string }
+        file_path: { type: string }
+        size_bytes: { type: integer }
+        status: { type: string }
+        created_at: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Carries packages[], the per-target production package records.
+    ForgePackageRecord:
+      type: object
+      description: |
+        One ready precision package as returned by GET .../packages (Forge
+        builds these automatically at optimization-job end; ready only).
+      properties:
+        precision: { type: string, enum: [fp32, fp16, int8], example: fp16 }
+        status: { type: string, example: ready }
+        package_uri: { type: string }
+        package_bytes: { type: integer }
+        package_sha256: { type: string }
+        detection_count: { type: integer }
+        devices: { type: array, items: { type: object, additionalProperties: true } }
+        quality_gate_passed: { type: boolean }
+        map50_baseline: { type: number }
+        map50_candidate: { type: number }
+    MmsDestination:
+      type: object
+      properties:
+        destinationOrgID: { type: string }
+        destinationType: { type: string, example: openhorizon.edgenode }
+        destinationID: { type: string, example: NUC }
+        communication: { type: string }
+        codeVersion: { type: string }
+    MmsObject:
+      type: object
+      properties:
+        objectID: { type: string }
+        objectType: { type: string }
+        description: { type: string }
+        version: { type: string }
+        noData: { type: boolean }
+        inactive: { type: boolean }
+        destinationType: { type: string }
+        destinationID: { type: string }
+        destinationsList:
+          type: array
+          items: { type: string }
+        objectSize: { type: integer }
+        activationTime: { type: string, format: date-time }
+        expiration: { type: string, format: date-time }
+        publishedAt:
+          type: string
+          format: date-time
+          description: Latest successful NH publication audit for this object identity; absent when no audit can be associated. ESS does not supply this timestamp.
+        publishedBy: { type: string }
+        publicationSource: { type: string, enum: [forge, custom-upload, url] }
+        operationID: { type: string, format: uuid }
+        packageSHA256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    MmsDestStatus:
+      type: object
+      properties:
+        destinationType: { type: string }
+        destinationID: { type: string }
+        status:
+          type: string
+          enum: [pending, delivering, delivered, consumed, deleted, error]
+        message: { type: string }
+    ServiceDeploymentServices:
+      type: object
+      description: Deployment image definition (keyed by service name)
+      properties:
+        image:
+          type: string
+        ports:
+          type: array
+          items:
+            type: object
+            properties:
+              HostPort:
+                type: string
+        privileged:
+          type: boolean
+        devices:
+          type: array
+          items:
+            type: string
+        command:
+          type: array
+          items:
+            type: string
+        entrypoint:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          items:
+            type: string
+        environment:
+          type: object
+          additionalProperties:
+            type: string
+        user:
+          type: string
+        pid:
+          type: string
+        ipc:
+          type: string
+        maxMemoryMb:
+          type: integer
+        maxCpus:
+          type: string
+        ephemeralPorts:
+          type: array
+          items:
+            type: string
+        tmpfs:
+          type: object
+          additionalProperties:
+            type: string
+        cap_add:
+          type: array
+          items:
+            type: string
+        sysctls:
+          type: object
+          additionalProperties:
+            type: string
+        logDriver:
+          type: string
+        secrets:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              cert:
+                type: string
+              seal:
+                type: object
+
+    ServiceBody:
+      type: object
+      required: [label, url, version, arch]
+      properties:
+        label:
+          type: string
+        description:
+          type: string
+        url:
+          type: string
+        version:
+          type: string
+        arch:
+          type: string
+        sharable:
+          type: string
+          enum: [single, multiple]
+          default: multiple
+        public:
+          type: boolean
+          default: false
+        matchHardware:
+          type: object
+        requiredServices:
+          type: array
+          items:
+            type: object
+        userInput:
+          type: array
+          items:
+            type: object
+        deployment:
+          type: object
+          description: Deployment config (auto-stringified and signed)
+          properties:
+            services:
+              type: object
+              additionalProperties:
+                $ref: '#/components/schemas/ServiceDeploymentServices'
+        deploymentSignature:
+          type: string
+        imageStore:
+          type: string
+        documentation:
+          type: string
+        clusterDeployment:
+          type: object
+        clusterDeploymentSignature:
+          type: string
+
+    PService:
+      type: object
+      description: Service reference within a pattern
+      properties:
+        serviceOrgID:
+          type: string
+        serviceArch:
+          type: string
+        serviceVersions:
+          type: array
+          items:
+            type: object
+            properties:
+              version:
+                type: string
+              priority:
+                type: object
+                properties:
+                  priority_value:
+                    type: integer
+                  retries:
+                    type: integer
+              upgradePolicy:
+                type: string
+                enum: [null, immediate, never, conservative]
+        nodeHealth:
+          type: object
+        dataVerify:
+          type: string

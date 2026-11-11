@@ -1,0 +1,57 @@
+# Copyright (C) 2026 YIQISOFT
+# SPDX-License-Identifier: Apache-2.0
+
+# Tag-only image publication (root treaty §19). One reusable-workflow call per
+# multi-stage build target; the repository has no VERSION file and the git tag
+# is the single version source. The organization workflow owns tag/VERSION
+# derivation (v0.0.1 -> bare 0.0.1), the amd64+arm64 index, the three-tag
+# scheme (no latest) and GHCR login, so this caller passes no VERSION
+# build-arg. No release event or manual dispatch path remains.
+#
+# Each caller passes a distinct gha cache-scope matching the ci.yml warm job:
+# without named scopes the two images' gha cache indexes overwrite each other.
+name: Publish Images
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prep:
+    name: Derive image build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.meta.outputs.build_date }}
+    steps:
+      - id: meta
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.image }}
+    needs: prep
+    strategy:
+      matrix:
+        include:
+          - target: backend
+            image: nereidhorizon-backend
+          - target: frontend
+            image: nereidhorizon-frontend
+    uses: NereidAI/.github/.github/workflows/release-image.yml@v1
+    with:
+      image-name: ${{ matrix.image }}
+      target: ${{ matrix.target }}
+      # Must match the ci.yml warm step's gha scope for this image exactly.
+      cache-scope: ${{ matrix.image }}
+      # OCI annotation inputs consumed by the Dockerfile's ARG declarations.
+      # VERSION itself is injected automatically by the reusable workflow.
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+        BUILD_DATE=${{ needs.prep.outputs.build_date }}

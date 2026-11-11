@@ -1,0 +1,362 @@
+<!--
+  Copyright (C) 2026 YIQISOFT
+  SPDX-License-Identifier: Apache-2.0
+-->
+
+
+# NereidHorizon
+
+[![CI](https://github.com/NereidAI/NereidHorizon/actions/workflows/ci.yml/badge.svg)](https://github.com/NereidAI/NereidHorizon/actions/workflows/ci.yml)
+[![Dev Images](https://github.com/NereidAI/NereidHorizon/actions/workflows/publish-dev.yml/badge.svg)](https://github.com/NereidAI/NereidHorizon/actions/workflows/publish-dev.yml)
+[![DCO](https://github.com/NereidAI/NereidHorizon/actions/workflows/dco.yml/badge.svg)](https://github.com/NereidAI/NereidHorizon/actions/workflows/dco.yml)
+[![License](https://img.shields.io/github/license/NereidAI/NereidHorizon)](LICENSE)
+[![Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-627185?logo=linux&logoColor=white)](https://github.com/NereidAI/NereidHorizon/actions/workflows/publish.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D24-339933?logo=node.js&logoColor=white)](package.json)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-fe519e?logo=conventionalcommits&logoColor=white)](https://www.conventionalcommits.org/)
+[![GHCR backend](https://img.shields.io/badge/GHCR-backend-2496ED?logo=docker&logoColor=white)](https://github.com/NereidAI/NereidHorizon/pkgs/container/nereidhorizon-backend)
+[![GHCR frontend](https://img.shields.io/badge/GHCR-frontend-2496ED?logo=docker&logoColor=white)](https://github.com/NereidAI/NereidHorizon/pkgs/container/nereidhorizon-frontend)
+
+NereidHorizon is a modern, lightweight Web Management Portal and BFF (Backend-For-Frontend) proxy gateway designed specifically for the [**Open Horizon Management Hub**](https://github.com/open-horizon).
+
+It provides an intuitive visual interface to simplify the service lifecycle and edge resource management in Open Horizon. With NereidHorizon, operators can seamlessly manage edge nodes, service definitions, deployment patterns, deployment policies, management policies, Agreement Bots (AgBots), and High Availability (HA) node groups.
+
+---
+
+## 🚀 Key Features
+
+1. **Modern Management Interface**
+   - Built with **React 18**, **Vite 5**, and **Ant Design 5 (antd)** for a sleek, responsive, and interactive user experience.
+   - Built-in multi-lingual support, fully localized in **English** and **Simplified Chinese (`zh-CN`)**.
+
+2. **Secure Session Authentication (production-grade)**
+   - Exchange credentials are **never stored in the browser** and **never persisted in plaintext** on the server.
+   - On login, the BFF verifies the Exchange credentials, encrypts them with **AES-256-GCM** (server-side master key), and persists the session in **PostgreSQL** with an idle TTL.
+   - The browser only holds an opaque `nereid_sid` in an **HttpOnly + Secure + SameSite=Lax** cookie (inaccessible to JavaScript).
+   - Idle sessions expire automatically; logout destroys the session and clears the cookie. Sessions survive backend restarts because they live in PostgreSQL, not memory.
+   - **Single Sign-On**: optional generic **OpenID Connect** (authorization code + PKCE) support. Roles are derived from a group claim, users are JIT-provisioned, and local password login can be disabled (`OIDC_LOCAL_LOGIN_ENABLED=false`) while the bootstrap admin keeps a break-glass `/login?local=1` entry.
+
+3. **Automated Deployment Signing & Key Management**
+   - When creating or updating service definitions, the BFF proxy **automatically signs deployment configurations** using the RSA-PSS SHA-256 algorithm.
+   - Automatically uploads the corresponding public key to the Exchange (`services/{id}/keys/default.public.key`), eliminating manual cryptographic signing steps.
+
+4. **Interactive JSON Importers**
+   - Seamlessly import services, deployment patterns, deployment policies, and management policies via JSON files.
+   - Automatically detects template variables (e.g., `$HZN_ORG_ID`, `$SERVICE_NAME`, `$SERVICE_VERSION`) and offers an interactive UI to replace them in real-time.
+
+5. **Cross-Organization Support**
+   - Browse public services and patterns across different organizations.
+   - Supports special headers (like `X-Root-Auth` and `X-Agbot-Auth`) for administrative tasks and high-privilege operations.
+
+6. **HA Node Groups**
+   - Configure, manage, and monitor High Availability groups, node memberships, and network configurations.
+
+7. **Audit & System Logging**
+   - All API requests, Exchange calls, login/logout events, and node-registration detections are written to `system.log` and `audit.log` under `../.deployment/deploy-logs/nereidhorizon`.
+   - The **Audit Log** page provides a searchable, expandable view of both logs.
+
+8. **TLS & Hardened Headers**
+   - The Nginx front end terminates **HTTPS (TLS 1.2/1.3)**; plain HTTP is redirected to HTTPS.
+   - Ships with HSTS, `X-Frame-Options: DENY`, CSP, `Referrer-Policy`, and other security response headers.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Frontend**: React 18, Vite 5, React Router v6, Ant Design v5, TypeScript
+- **Backend (BFF Proxy)**: Express 5, Node.js (Crypto API), `openid-client` (OIDC), `pg` (PostgreSQL)
+- **Session Store**: PostgreSQL (required), AES-256-GCM encrypted sessions at rest
+- **Deployment**: Docker & Docker Compose, Nginx (TLS reverse proxy)
+
+---
+
+## 📁 Project Structure
+
+```text
+NereidHorizon/
+├── src/                    # Frontend React Source Code
+│   ├── api/                # API Request Layer (calling BFF APIs)
+│   │   ├── config.ts       # In-memory UI session state (no credentials)
+│   │   ├── client.ts       # Fetch wrapper (cookie-based auth)
+│   │   └── *.ts            # Per-resource API clients
+│   ├── components/         # Common UI Components and AppLayout
+│   ├── i18n/               # Multi-lingual translations (zh.ts, context)
+│   ├── pages/              # UI Page Modules (Dashboard, Nodes, Services, Agbots, etc.)
+│   ├── App.tsx             # Route config, providers, session bootstrap
+│   └── main.tsx            # React application mount entrypoint
+├── server/                 # BFF Proxy Server (Express)
+│   ├── index.cjs           # Backend entrypoint (routes, auth, PG session store, OIDC, proxying)
+│   ├── db.cjs              # PostgreSQL layer (schema + CRUD)
+│   ├── oidc.cjs            # OpenID Connect (discovery, login, callback, role mapping)
+│   └── sign-utils.cjs      # Cryptographic utils (RSA-PSS SHA-256 generator/signer)
+├── docker/
+│   ├── nginx-entrypoint.sh # Generates self-signed TLS cert if none is mounted
+│   └── nginx.dev.conf      # Nginx config for the local docker-dev-* stack
+├── deploy/                 # Open Horizon Hub & Agbot Deployment Templates
+├── docs/                   # OpenAPI specifications (console and partner APIs)
+├── nginx.conf              # Nginx TLS + reverse-proxy + security headers
+├── Dockerfile              # Multi-stage: backend runtime + nginx frontend
+├── docker-compose.yaml     # Production compose (ghcr.io images, postgres)
+├── docker-compose.dev.yaml # Isolated local-build dev stack (project "nereid-dev")
+├── Makefile                # Build, dev, docker helpers
+├── scripts/                # Offline image export/load helpers
+├── .github/                # CI, DCO and image-publish workflows, dependabot, issue/PR templates
+├── LICENSE                 # Apache License 2.0
+├── NOTICE                  # Third-party attribution
+├── SECURITY.md             # Vulnerability reporting + security model
+├── CONTRIBUTING.md         # Contribution guidelines
+├── CODE_OF_CONDUCT.md      # Community standards
+├── .env.example            # Backend environment template
+└── package.json            # Node.js dependencies and scripts
+```
+
+---
+
+## 🚦 Getting Started (Local Development)
+
+> For full installation details — environment variables, PostgreSQL setup, Exchange configuration, and first-time setup — see **[INSTALL.md](INSTALL.md)**.
+
+### 1. Install Dependencies
+
+```bash
+npm install
+```
+
+### 2. Run the Development Servers
+
+Use `make dev-all` to start the whole stack (PostgreSQL container + backend + frontend) with one command. It is idempotent and **kills any existing dev servers** before starting, so re-running it is safe:
+
+```bash
+make dev-all
+```
+
+Or start each piece individually:
+
+*   **Start BFF Proxy Server**:
+    ```bash
+    make dev-backend   # or: npm run dev:backend
+    ```
+    Listens on `http://localhost:3001`. Requires `DATABASE_URL` (PostgreSQL). See [INSTALL.md](INSTALL.md) for environment variable reference.
+
+*   **Start Vite Frontend**:
+    ```bash
+    make dev-frontend   # or: npm run dev
+    ```
+    Frontend requests to `/api/*` are proxied to the BFF at `http://localhost:3001`.
+
+Stop everything with `make dev-stop` (keeps the dev database) or `make dev-clean` (also removes build artifacts and the dev database).
+
+> **Note**: In production the front end is served by Nginx over HTTPS (see Docker Deployment). Local dev uses plain HTTP and the browser dev server.
+
+---
+
+## 🐳 Docker Deployment
+
+The project ships a multi-stage `Dockerfile` and two Compose files. Choose your mode:
+
+| Mode | Command | Images |
+|---|---|---|
+| **Production** (pull) | `make docker-up` | Pulls from `ghcr.io/nereidai/*` |
+| **Development** (build) | `make docker-dev-up` | Builds locally from source |
+
+> The `docker-dev-*` stack is **fully isolated** from production: it runs under a
+> separate Compose project (`nereid-dev`), uses its own containers (`*-dev` suffix),
+> its own volumes, and its own postgres (`127.0.0.1:5434`) — so `docker-dev-up` and
+> `docker-up` can run side by side without colliding, including their databases.
+
+Services (production compose):
+
+| Service | Image | Purpose | Port |
+|---|---|---|---|
+| `postgres` | `postgres:16-alpine` | Database for BFF (sessions, audit, settings, users) | internal |
+| `nereidhorizon-backend` | ghcr or local | BFF API proxy | `3001` (internal) |
+| `nereidhorizon-frontend` | ghcr or local | Nginx + static assets + TLS | `8090` (HTTP→HTTPS), `8443` (HTTPS) |
+
+Dev stack (`docker-dev-*`): the frontend is served over plain HTTP on `8091`, and
+postgres is exposed on `127.0.0.1:5434`; the backend keeps its default internal
+port, so neither collides with production.
+
+### Build & Launch
+
+**Local build (development)**:
+```bash
+make docker-dev-up
+```
+
+**Pull from GHCR (production)**:
+```bash
+make docker-up
+```
+
+- Open **https://&lt;host&gt;:8443/** (HTTP on `8090` redirects to HTTPS).
+- For the local `docker-dev-*` stack, open **http://&lt;host&gt;:8091/** (plain HTTP, no TLS).
+- The first launch auto-generates a self-signed certificate at `/etc/nginx/ssl`. For production, mount real certificates there instead (see below).
+- First-time start requires visiting the UI to complete the **Setup** form (create admin account + Exchange connection). The Setup form includes a **random strong-password generator** and **confirm-password** validation. See **[INSTALL.md § First-time Exchange configuration](INSTALL.md#4-first-time-exchange-configuration-setup-form)** for details.
+
+### Backend Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | _(required)_ | PostgreSQL connection string |
+| `PORT` | `3001` | BFF listen port |
+| `SESSION_TTL` | `86400` | Session idle lifetime in seconds (24 h) |
+| `SESSION_ABS_TTL` | `28800` | Absolute session lifetime in seconds (8 h) |
+| `SESSION_ENC_KEY` | _(generated and persisted)_ | 32-byte master key as 64 hex chars for AES-256-GCM. **Set it in production** so sessions survive host/key-file replacement. |
+| `NEREIDHORIZON_ENV_FILE` | `../.deployment/deploy-values/nereidhorizon/backend.env` | Backend environment file; `ENV_FILE` is also accepted |
+| `NEREIDHORIZON_LOG_DIR` | `../.deployment/deploy-logs/nereidhorizon` | Process/system/audit log directory; `LOG_DIR` is also accepted |
+| `NEREIDHORIZON_SESSION_KEY_FILE` | `../.deployment/deploy-values/nereidhorizon/state/session.key` | Generated session key; `SESSION_KEY_FILE` is also accepted |
+| `OIDC_ISSUER` | _(unset)_ | OIDC issuer URL; unset disables SSO |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | — | OIDC client credentials |
+| `OIDC_REDIRECT_URI` | — | Public callback URL, e.g. `https://host/api/oidc/callback` |
+| `OIDC_SCOPES` | `openid profile email` | Requested scopes |
+| `OIDC_ROLE_CLAIM` | `groups` | Claim holding group membership |
+| `OIDC_PLATFORM_GROUP` | `nereidhorizon-platform` | Group granting the platform role |
+| `OIDC_PARTNER_GROUP_PREFIX` | `nereidhorizon-partner-` | Group prefix mapping to an Exchange org |
+| `OIDC_LOCAL_LOGIN_ENABLED` | `true` | Set `false` to disable local password login |
+| `OIDC_INSECURE_SKIP_VERIFY` | `false` | Skip TLS verification of the IdP (dev only) |
+| `NS_BASE_URL` | _(unset)_ | NereidSphere base URL; enables NS ticket SSO (default front door when set) |
+| `NS_PRODUCT_ID` | _(unset)_ | NS product token (`horizon`) |
+| `NS_CLIENT_SECRET` | _(unset)_ | Per-product SSO secret shared with NS |
+| `NS_CALLBACK_PATH` | `/auth/ns-callback` | Public ticket landing route |
+| `MMS_UPLOAD_MAX_BYTES` | `8589934592` | Maximum compressed custom-package upload or URL download (8 GiB) |
+| `MMS_UPLOAD_MAX_EXPANDED_BYTES` | `17179869184` | Maximum total expanded regular-file bytes (16 GiB) |
+| `MMS_UPLOAD_MAX_FILE_BYTES` | `17179869184` | Maximum expanded size of one archive entry (16 GiB) |
+| `MMS_UPLOAD_MAX_ENTRIES` | `100000` | Maximum tar entry count |
+| `MMS_UPLOAD_TEMP_DIR` | `/tmp` | Parent for private per-operation spool directories; size it for concurrent uploads |
+| `MMS_MODEL_URL_ALLOWED_ORIGINS` | _(empty)_ | Comma/whitespace-separated HTTP(S) Origins allowed for URL distribution; empty disables URL sources |
+| `MMS_MODEL_URL_TIMEOUT_SECONDS` | `3600` | Total URL download timeout; every redirect is revalidated against the allowlist |
+
+Paths resolve from the repository root, so direct backend starts do not depend on the
+current working directory. Centralized site values also include `values.yaml` for Helm
+and `exchange.env` for Exchange/agbot operations; neither is loaded as BFF configuration.
+Until an existing installation is centralized, startup falls back to its root `.env`
+and `.session.key` when the central equivalents are absent. See
+[INSTALL.md](INSTALL.md#2-environment-variables) for the complete layout.
+
+### Custom Model Package Provenance and Rollback
+
+Platform operators can distribute an operator-built `nereid-model/1` `.tar.gz` from a local file or an allowlisted HTTP(S) URL. The BFF spools the original bytes to a private temporary file, validates the root descriptor and every declared payload's exact size and SHA-256, streams the same bytes to ESS, and removes the spool on every completion path. It never selects payloads or rebuilds the archive. URL sources may use signed query parameters, but only the final Origin is audited; embedded URL credentials are rejected.
+
+ESS/MMS is the durable copy of the package, not the BFF spool. Audit events correlate `started`, `received`, `validated`, `spool_cleaned`, publication, and failure stages with an `operationID`, and record actor, model identity, package SHA-256, sizes, destinations, and non-sensitive source metadata. Use immutable, versioned Object IDs and retain older ESS objects when rollback may be required. Audit records prove what was published but cannot reconstruct package bytes after both the spool and the ESS object have been deleted.
+
+### API Documentation
+
+The BFF serves an offline Swagger UI at `/api/docs` (also `/api/docs/`) and the console OpenAPI contract at `/api/docs/openapi.yaml`. The UI assets and specification are included in the backend image; no external CDN or runtime internet access is required. Documentation supports GET/HEAD without a session. Business API calls made with **Try it out** retain the normal console authentication and CSRF requirements.
+
+---
+
+## 🔒 Security Model (for Audit)
+
+- **Credential confidentiality**: Exchange `Basic` credentials are encrypted with **AES-256-GCM** (`server/index.cjs`) using a server-side master key before being written to PostgreSQL. PostgreSQL never stores plaintext credentials. Outside containers the master key file (`../.deployment/deploy-values/nereidhorizon/state/session.key`) is created with `0600` permissions; a legacy repository-root `.session.key` is reused when no central key exists.
+- **Browser attack surface**: The session identifier is an opaque random token in an `HttpOnly; Secure; SameSite=Lax` cookie. It is unreadable by JavaScript (XSS-resistant) and validated together with a CSRF double-submit token on every mutation.
+- **Transport security**: All browser traffic is served over HTTPS (TLS 1.2/1.3). HTTP is redirected to HTTPS. HSTS is enabled.
+- **Session lifetime**: idle TTL (`SESSION_TTL`) plus an absolute TTL (`SESSION_ABS_TTL`), enforced by an in-memory sweeper and expired-row cleanup in PostgreSQL. Logout immediately invalidates the session and clears the cookie.
+- **SSO safety**: SSO logins (NereidSphere ticket or direct OIDC) are fail-closed — unmapped, malformed or ambiguous group claims, missing/unknown Exchange orgs, unverified email, and disabled accounts are all rejected. NS gateway integration calls additionally require the secret `X-NS-Integration-Secret` header and an admin/operator suite role. Federated users are identified by `(issuer, subject)`, never merged by username/email.
+- **Input safety**: Request bodies are filtered through strict field whitelists (`serviceBody`, `patternBody`, `sanitizeBody`) to prevent payload pollution.
+- **Auditability**: Every API call, Exchange call, and auth event (login/logout/node_register) is recorded with timestamp, user, method, path, status, and duration in `../.deployment/deploy-logs/nereidhorizon/system.log` and `audit.log`.
+- **Durability**: Sessions are stored in PostgreSQL, so a backend restart or a second replica preserves logins (no in-memory-only degradation).
+
+---
+
+## 🏭 Offline / Air-Gapped Production Deployment
+
+This project is designed to run **without internet access** in production.
+
+1. **Build and export images on a connected machine**:
+   ```bash
+   make images-export
+   ```
+   (Equivalent to `docker compose build` + `docker save` of
+   `nereidhorizon-backend`, `nereidhorizon-frontend`,
+   and `postgres:16-alpine` into `nereid-images.tar`.)
+2. **Transfer** `nereid-images.tar` to the production host and load:
+   ```bash
+   make images-load
+   ```
+3. **Start** with Compose:
+   ```bash
+   docker compose --env-file ../.deployment/deploy-values/nereidhorizon/backend.env up -d
+   ```
+   No `npm install` or image pull occurs at runtime — all dependencies are baked into the images via the offline `Dockerfile` (`COPY node_modules`).
+
+### Production hardening checklist
+
+- **TLS certificate**: Mount a CA-signed certificate/key to `/etc/nginx/ssl/fullchain.pem` and `/etc/nginx/ssl/privkey.pem` (bind mount or volume) so the self-signed cert is not used.
+- **Session master key**: Set `SESSION_ENC_KEY` (64 hex chars) via an environment file/secret so the key persists across container recreation and is not auto-generated per host.
+- **Persist PostgreSQL data**: The `postgres-data` named volume is already declared; keep it to retain sessions, users, and audit data across restarts.
+- **Reverse proxy**: Place the container stack behind your corporate TLS-terminating ingress if preferred; the built-in Nginx TLS is sufficient for direct exposure.
+
+---
+
+## 📦 Container Images (GHCR)
+
+Prebuilt multi-arch (`amd64`, `arm64`) images are published to GitHub Container Registry on each release tag under the three-tag scheme (treaty §19.2) — VERSION, VERSION-timestamp and VERSION-git-sha, no `latest`:
+
+```bash
+# Branch / rolling dev channel (also the local-build and Compose default)
+docker pull ghcr.io/nereidai/nereidhorizon-backend:0.0.0-dev
+docker pull ghcr.io/nereidai/nereidhorizon-frontend:0.0.0-dev
+# A tagged release publishes bare SemVer tags instead, e.g. v0.0.1 -> :0.0.1
+```
+
+To run directly from GHCR (production), use `make docker-up` — this pulls the published images. For local development with your source changes, use `make docker-dev-up`, which builds locally via `docker-compose.dev.yaml`. For fully offline/air-gapped deployment, export the images locally with `make images-export` and transfer them to the offline host.
+
+---
+
+## 🛠️ Makefile Automations
+
+A `Makefile` is provided to speed up common workflows.
+
+| Command | Description |
+|---|---|
+| **Local Development (npm)** | |
+| `make install` | Install npm packages locally |
+| `make build` | Compile and build the React app to `dist/` |
+| `make dev-pg` | Start a dedicated PostgreSQL for the BFF (idempotent), writes centralized `backend.env` |
+| `make dev-backend` | Run the backend BFF in development mode (kills any existing one first) |
+| `make dev-frontend` | Run the Vite frontend dev server (kills any existing one first) |
+| `make dev-all` | (Re)start pg + backend + frontend with one command |
+| `make dev-stop` | Stop backend & frontend & the dev database (keeps pg data) |
+| `make dev-clean` | Stop everything + remove build artifacts (`dist/`) and the dev database |
+| **Docker (ghcr.io images — production)** | |
+| `make docker-up` | Pull GHCR images & start production containers |
+| `make docker-down` | Stop and remove production containers (keeps data volumes) |
+| `make docker-clean` | Stop and remove containers **and** their data volumes |
+| `make docker-logs` | Tail production container logs |
+| `make docker-ps` | Show production stack status |
+| **Docker (local build — development/test, isolated project `nereid-dev`)** | |
+| `make docker-dev-build` | Build Docker images from local source |
+| `make docker-dev-up` | Build (if needed) & start the local dev stack (isolated from prod) |
+| `make docker-dev-down` | Stop the local dev stack (keeps data volumes) |
+| `make docker-dev-clean` | Stop the local dev stack **and** remove data volumes |
+| `make docker-dev-logs` | Tail local dev stack logs |
+| `make docker-dev-ps` | Show local dev stack status |
+| `make docker-build` | Alias for `docker-dev-build` |
+| **Maintenance** | |
+| `make clean` | Delete temporary files, `dist/`, and `node_modules/` |
+
+---
+
+## 🤝 Repository & Community
+
+- **Source**: https://github.com/NereidAI/NereidHorizon
+- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Code of Conduct**: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- **Security Policy**: see [SECURITY.md](SECURITY.md) (please report vulnerabilities privately)
+
+---
+
+## 🙏 Acknowledgments
+
+NereidHorizon builds on the work of [Open Horizon](https://open-horizon.github.io/), an [LF Edge](https://lfedge.org/projects/open-horizon/) project:
+
+- [Open Horizon on GitHub](https://github.com/open-horizon) — the open-source edge management platform (Apache-2.0) whose Exchange API, agent and Agreement Bot this console operates
+- [Open Horizon documentation](https://open-horizon.github.io/docs/)
+
+NereidHorizon is an independent community project. It is not part of, and is
+not endorsed by, the Open Horizon project or LF Edge.
+
+---
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
