@@ -32,14 +32,14 @@
     "express": "^5.2.1",
     "openid-client": "^5.7.1",
     "pg": "^8.23.0",
-    "react": "^19.2.0",
+    "react": "^19.3.1",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.18.1",
     "swagger-ui-dist": "^5.34.1",
     "tar-stream": "^3.2.2"
   },
   "devDependencies": {
-    "@types/react": "^19.2.0",
+    "@types/react": "^19.3.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.0",
     "typescript": "^7.0.2",
