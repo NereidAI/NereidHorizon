@@ -151,14 +151,14 @@ Stop everything with `make dev-stop` (keeps the dev database) or `make dev-clean
 
 ## ☸️ Kubernetes / k3s Deployment
 
-Install the versioned public OCI chart after NereidIdentity and NereidSphere.
-The immutable Lab/POC version below passed anonymous chart pull/render and
-backend/frontend image-manifest verification on 2026-11-22. Use a verified
-formal version instead when one is published; floating `0.0.0-dev` is not a
-reproducible installation input.
+Install the public OCI chart after NereidIdentity and NereidSphere. The
+floating `0.0.0-dev` OCI tag aliases the latest successfully published
+immutable `0.0.0-dev-<short-sha>` chart manifest, whose `appVersion` selects
+both matching immutable application images. Use a verified formal version
+instead when one is published.
 
 ```bash
-export NEREIDHORIZON_VERSION=0.0.0-dev-05aaf97
+export NEREIDHORIZON_VERSION=0.0.0-dev
 export DEPLOYMENT_ROOT="${DEPLOYMENT_ROOT:-$HOME/.nereidai-deployment}"
 install -d -m 700 "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon"
 test -s "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml" || \
@@ -175,9 +175,12 @@ helm upgrade --install nereidhorizon \
   --values "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml"
 ```
 
-The chart pulls `nereidhorizon-backend` and `nereidhorizon-frontend` at the
-same immutable version through its `appVersion`. Complete the first-run Setup
-form with a new platform administrator and the Open Horizon Exchange hub-level
+Record the OCI digest and resolved chart version for each deployment. For
+deliberate reproduction, replace `NEREIDHORIZON_VERSION` with the resolved
+`0.0.0-dev-<short-sha>` snapshot instead of the floating selector. The chart
+pulls `nereidhorizon-backend` and `nereidhorizon-frontend` at that immutable
+`appVersion`. Complete the first-run Setup form with a new platform
+administrator and the Open Horizon Exchange hub-level
 super-account. Configure Forge and ESS endpoints at runtime; Pattern delivery
 and ESS model delivery are separate acceptance steps.
 
