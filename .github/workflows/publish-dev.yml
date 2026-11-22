@@ -58,7 +58,7 @@ jobs:
         BUILD_DATE=${{ needs.prep.outputs.build_date }}
 
   publish-dev-chart:
-    name: Publish dev Helm charts
+    name: Publish dev Helm chart
     needs: publish
     uses: NereidAI/.github/.github/workflows/publish-chart.yml@v1
     with:
