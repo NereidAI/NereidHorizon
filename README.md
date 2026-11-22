@@ -149,6 +149,40 @@ Stop everything with `make dev-stop` (keeps the dev database) or `make dev-clean
 
 ---
 
+## ☸️ Kubernetes / k3s Deployment
+
+Install the versioned public OCI chart after NereidIdentity and NereidSphere.
+The immutable Lab/POC version below passed anonymous chart pull/render and
+backend/frontend image-manifest verification on 2026-11-22. Use a verified
+formal version instead when one is published; floating `0.0.0-dev` is not a
+reproducible installation input.
+
+```bash
+export NEREIDHORIZON_VERSION=0.0.0-dev-05aaf97
+export DEPLOYMENT_ROOT="${DEPLOYMENT_ROOT:-$HOME/.nereidai-deployment}"
+install -d -m 700 "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon"
+test -s "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml" || \
+  helm show values oci://ghcr.io/nereidai/charts/nereidhorizon \
+    --version "$NEREIDHORIZON_VERSION" \
+    > "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml"
+chmod 600 "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml"
+# Set the site Ingress host and the NereidSphere ns.baseUrl/productId/
+# clientSecret values before installing; keep the example file out of Git.
+helm upgrade --install nereidhorizon \
+  oci://ghcr.io/nereidai/charts/nereidhorizon \
+  --version "$NEREIDHORIZON_VERSION" \
+  --namespace nereidhorizon --create-namespace --timeout 8m \
+  --values "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml"
+```
+
+The chart pulls `nereidhorizon-backend` and `nereidhorizon-frontend` at the
+same immutable version through its `appVersion`. Complete the first-run Setup
+form with a new platform administrator and the Open Horizon Exchange hub-level
+super-account. Configure Forge and ESS endpoints at runtime; Pattern delivery
+and ESS model delivery are separate acceptance steps.
+
+---
+
 ## 🐳 Docker Deployment
 
 The project ships a multi-stage `Dockerfile` and two Compose files. Choose your mode:
