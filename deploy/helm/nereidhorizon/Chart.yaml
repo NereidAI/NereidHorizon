@@ -10,10 +10,9 @@ apiVersion: v2
 name: nereidhorizon
 description: NereidHorizon (BFF backend + nginx frontend + PostgreSQL)
 type: application
-# Chart package version is bumped independently at release packaging time.
-# appVersion is the rolling-dev placeholder on the branch; a tag release
-# injects the bare SemVer (0.0.1) via `helm package --app-version`.
-version: 0.0.1
+# Tracked sources stay on the rolling-dev placeholder. Release and immutable
+# development packages inject both versions via helm package.
+version: 0.0.0-dev
 appVersion: "0.0.0-dev"
 keywords:
   - open-horizon
