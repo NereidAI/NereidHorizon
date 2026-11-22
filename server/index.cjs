@@ -1567,6 +1567,9 @@ app.get('/api/registry/tags', requireAuth, async (req, res) => {
       let body = '';
       proxyRes.on('data', (chunk) => { body += chunk; });
       proxyRes.on('end', () => {
+        // Upstream auth failure, missing repository, etc. Signal the failure so
+        // the UI can offer manual tag entry instead of a silently empty list.
+        if (proxyRes.statusCode >= 400) return res.json({ tags: [], error: true });
         try {
           const data = JSON.parse(body);
           let tags = [];
@@ -1581,13 +1584,13 @@ app.get('/api/registry/tags', requireAuth, async (req, res) => {
             return b.localeCompare(a);
           });
           return res.json({ tags });
-        } catch { res.json({ tags: [] }); }
+        } catch { res.json({ tags: [], error: true }); }
       });
     });
-    proxyReq.on('error', () => { res.json({ tags: [] }); });
+    proxyReq.on('error', () => { res.json({ tags: [], error: true }); });
     proxyReq.end();
   } catch {
-    res.json({ tags: [] });
+    res.json({ tags: [], error: true });
   }
 });
 
