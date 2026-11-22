@@ -55,3 +55,12 @@ jobs:
       build-args: |
         GIT_SHA=${{ github.sha }}
         BUILD_DATE=${{ needs.prep.outputs.build_date }}
+
+  publish-chart:
+    name: Publish Helm chart
+    needs: publish
+    uses: NereidAI/.github/.github/workflows/publish-chart.yml@v1
+    with:
+      chart-path: deploy/helm/nereidhorizon
+      chart-name: nereidhorizon
+      channel: release
