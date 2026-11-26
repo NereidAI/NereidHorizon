@@ -12,6 +12,15 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      # react and react-dom must move in lockstep: a split update produces
+      # bundles that crash at runtime with React error #527 (version mismatch).
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
 
   - package-ecosystem: "github-actions"
     directory: "/"
