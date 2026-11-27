@@ -1,13 +1,14 @@
 # Copyright (C) 2026 YIQISOFT
 # SPDX-License-Identifier: Apache-2.0
 
-# Rolling dev channel (root treaty §19). Every push to main publishes the
-# 0.0.0-dev floating tag and an immutable 0.0.0-dev-<sha> tag per image to
-# GHCR via the organization reusable workflow. There is no VERSION file and
-# no release tag on a branch build, so the dev version is fixed 0.0.0-dev.
-# Pull requests deliberately do not trigger this, so forks cannot publish
-# into the organization namespace. Formal releases remain tag-only through
-# publish.yml.
+# Rolling dev channel (root treaty §19). Every push to main publishes to
+# GHCR via the organization reusable workflows: each image keeps its floating
+# 0.0.0-dev tag alongside the per-commit traceability tag, while the
+# development chart is published on the single floating 0.0.0-dev identity
+# (no per-commit chart tag). There is no VERSION file and no release tag on a
+# branch build, so the dev version is fixed 0.0.0-dev. Pull requests
+# deliberately do not trigger this, so forks cannot publish into the
+# organization namespace. Formal releases remain tag-only through publish.yml.
 #
 # One reusable-workflow call per matrix image, each with the same gha
 # cache-scope as the matching ci.yml warm job and publish.yml release caller.
