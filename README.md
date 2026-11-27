@@ -151,11 +151,14 @@ Stop everything with `make dev-stop` (keeps the dev database) or `make dev-clean
 
 ## ☸️ Kubernetes / k3s Deployment
 
-Install the public OCI chart after NereidIdentity and NereidSphere. The
-floating `0.0.0-dev` OCI tag aliases the latest successfully published
-immutable `0.0.0-dev-<short-sha>` chart manifest, whose `appVersion` selects
-both matching immutable application images. Use a verified formal version
-instead when one is published.
+Install the public OCI chart after NereidIdentity and NereidSphere.
+`0.0.0-dev` is the single rolling development identity for the chart and
+both application images: each main-branch publication moves the tag to the
+new verified manifest, and the chart selects the floating `0.0.0-dev`
+images. Earlier `0.0.0-dev-<short-sha>` chart tags remain for reproducing
+historical snapshots, but new development builds no longer create
+per-commit chart tags. Use a verified formal version instead when one is
+published.
 
 ```bash
 export NEREIDHORIZON_VERSION=0.0.0-dev
@@ -175,11 +178,12 @@ helm upgrade --install nereidhorizon \
   --values "$DEPLOYMENT_ROOT/deploy-values/nereidhorizon/values.yaml"
 ```
 
-Record the OCI digest and resolved chart version for each deployment. For
-deliberate reproduction, replace `NEREIDHORIZON_VERSION` with the resolved
-`0.0.0-dev-<short-sha>` snapshot instead of the floating selector. The chart
-pulls `nereidhorizon-backend` and `nereidhorizon-frontend` at that immutable
-`appVersion`. Complete the first-run Setup form with a new platform
+Record the OCI digest and resolved chart version for each deployment;
+pinning that digest reproduces a given floating-tag snapshot even after the
+tag moves. For historical builds, replace `NEREIDHORIZON_VERSION` with one
+of the retained `0.0.0-dev-<short-sha>` snapshots instead of the floating
+selector. The chart pulls `nereidhorizon-backend` and
+`nereidhorizon-frontend` at the floating `0.0.0-dev` image tags. Complete the first-run Setup form with a new platform
 administrator and the Open Horizon Exchange hub-level
 super-account. Configure Forge and ESS endpoints at runtime; Pattern delivery
 and ESS model delivery are separate acceptance steps.
